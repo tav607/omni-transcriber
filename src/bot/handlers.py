@@ -75,6 +75,7 @@ def sanitize_filename(filename: str, max_length: int = 50) -> str:
 
     - Extracts basename to remove any path components
     - Replaces unsafe characters with underscores
+    - Collapses consecutive underscores into one
     - Limits length to prevent filesystem issues
     """
     # Extract just the filename, removing any path components
@@ -87,9 +88,15 @@ def sanitize_filename(filename: str, max_length: int = 50) -> str:
     name = SAFE_FILENAME_PATTERN.sub("_", name)
     ext = SAFE_FILENAME_PATTERN.sub("_", ext)
 
-    # Limit length
+    # Collapse consecutive underscores into one
+    name = re.sub(r"_+", "_", name)
+
+    # Strip leading/trailing underscores
+    name = name.strip("_")
+
+    # Limit length (ensure we don't end with underscore after truncation)
     if len(name) > max_length:
-        name = name[:max_length]
+        name = name[:max_length].rstrip("_")
 
     # Ensure we have a valid name
     if not name:
@@ -572,7 +579,7 @@ async def _process_video_url(
 
         if title:
             # Sanitize the title for use as filename
-            safe_title = sanitize_filename(title, max_length=30)
+            safe_title = sanitize_filename(title, max_length=200)
         else:
             # Fallback to video_id/platform if no title found
             if platform == "youtube":
@@ -700,10 +707,10 @@ async def _process_apple_podcast(
     if editor_metadata:
         safe_title = sanitize_filename(
             f"{editor_metadata.podcast_name}_{editor_metadata.episode_title}",
-            max_length=40
+            max_length=200
         )
     else:
-        safe_title = sanitize_filename(edited_result.title, max_length=40) or "podcast"
+        safe_title = sanitize_filename(edited_result.title, max_length=200) or "podcast"
 
     # Add date stamp
     date_stamp = datetime.now().strftime("%Y%m%d")
@@ -818,7 +825,7 @@ async def _process_audio_file(
         title = extract_title_from_transcript(edited_transcript)
         if title:
             # Sanitize the title for use as filename
-            safe_title = sanitize_filename(title, max_length=30)
+            safe_title = sanitize_filename(title, max_length=200)
         else:
             # Fallback to original filename if no title found
             safe_title = base_name

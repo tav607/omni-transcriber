@@ -21,6 +21,16 @@ CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
 MIN_MEANINGFUL_CONTENT = 50  # Minimum chars of actual text (excluding timestamps/sound effects)
 
 
+@dataclass
+class VideoEditorMetadata:
+    """Metadata for video sources (YouTube/Bilibili) used in editing."""
+    title: str
+    channel: str
+    description: str = ""
+    upload_date: str = ""
+    webpage_url: str = ""
+
+
 def _has_meaningful_content(chunk: str) -> bool:
     """Check if a chunk has meaningful content beyond just timestamps/sound effects.
 
@@ -51,6 +61,46 @@ RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task 
 
 1. **修正转录错误**：
    - 修正明显的语音转文字错误（音近字、同音字）
+   - 修正专业术语、公司名称、人名的转录错误
+   - 保留专有名词、产品名称、版本号、技术术语的原样
+
+2. **移除填充词**：
+   - 移除中文填充词：嗯、啊、呃、额、哦、唔、那个、就是、然后、对对对、是是是
+   - 移除英文填充词：um, uh, like, you know, I mean, sort of, kind of, basically
+   - 保留有实际语义的语气词和感叹词
+
+3. **格式规范**：
+   - 适当分段提高可读性
+   - 按说话人变化或话题变化自然分段
+   - 移除重复的口吃表达
+
+4. **保持完整**：
+   - 输出完整内容，绝对不要截断或省略任何部分
+   - 保持原语言，不要翻译
+   - 保留技术术语、专有名词
+
+## Output Format
+
+直接输出编辑后的转录文本，不要添加任何标题、说明或JSON。
+只输出编辑后的内容。
+
+## CRITICAL RULES
+- 必须输出完整内容，不能省略任何部分
+- 不要添加任何前言或总结
+- 直接输出编辑后的转录文本
+"""
+
+# Raw transcript editing prompt WITH context (for YouTube/Bilibili with metadata)
+RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task is to clean up this raw transcript chunk.
+
+## Video Context
+Use the video information provided to help identify correct speaker names, channel hosts, and proper nouns.
+
+## Your Tasks
+
+1. **修正转录错误**：
+   - 修正明显的语音转文字错误（音近字、同音字）
+   - 修正说话人名字错误（根据元数据中的频道名和描述推断正确名字）
    - 修正专业术语、公司名称、人名的转录错误
    - 保留专有名词、产品名称、版本号、技术术语的原样
 
@@ -199,6 +249,7 @@ async def edit(
     config: EditorConfig,
     system_prompt_override: str | None = None,
     enable_translation: bool = False,
+    metadata: Optional[VideoEditorMetadata] = None,
     on_status: Callable[[str], None] | None = None,
 ) -> str:
     """
@@ -212,6 +263,7 @@ async def edit(
         config: Editor configuration
         system_prompt_override: Optional override for the system prompt
         enable_translation: If True, add inline Chinese translations for non-Chinese transcripts
+        metadata: Optional video metadata for context (helps with speaker names, proper nouns)
         on_status: Optional callback to report status updates
 
     Returns:
@@ -255,6 +307,7 @@ async def edit(
                     thinking_budget,
                     index,
                     len(chunks),
+                    metadata,
                 ),
                 max_attempts=3,
                 base_delay_ms=1000,
@@ -281,6 +334,7 @@ async def edit(
                 thinking_budget,
                 0,
                 1,
+                metadata,
             ),
             max_attempts=3,
             base_delay_ms=1000,
@@ -337,18 +391,38 @@ async def _edit_raw_chunk(
     thinking_budget: int,
     chunk_index: int,
     total_chunks: int,
+    metadata: Optional[VideoEditorMetadata] = None,
 ) -> str:
     """Edit a raw transcript chunk (fix errors, remove fillers)."""
     logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks}...")
 
-    user_content = f"## Raw Transcript Chunk ({chunk_index + 1}/{total_chunks})\n\n{chunk}"
+    # Build user content with optional metadata context
+    parts = []
+    if metadata:
+        parts.append("## Video Information (用于推断正确的说话人名字和专有名词)")
+        parts.append(f"- Channel: {metadata.channel}")
+        parts.append(f"- Title: {metadata.title}")
+        if metadata.upload_date:
+            parts.append(f"- Date: {metadata.upload_date}")
+        if metadata.description:
+            parts.append(f"- Description: {metadata.description}")
+        parts.append("")
+
+    parts.append(f"## Raw Transcript Chunk ({chunk_index + 1}/{total_chunks})")
+    parts.append("")
+    parts.append(chunk)
+
+    user_content = "\n".join(parts)
+
+    # Use context-aware prompt if metadata provided
+    system_prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if metadata else RAW_EDIT_SYSTEM_PROMPT
 
     def _generate():
         return client.models.generate_content(
             model=model,
             contents=user_content,
             config=types.GenerateContentConfig(
-                system_instruction=RAW_EDIT_SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 temperature=temperature,
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
                 max_output_tokens=65536,  # Allow large output for long chunks

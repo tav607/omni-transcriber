@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import tempfile
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import yt_dlp
 
@@ -17,6 +18,25 @@ from ..utils.url_parser import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class VideoMetadata:
+    """Metadata extracted from YouTube/Bilibili videos."""
+    title: str
+    channel: str  # uploader/channel name
+    description: str = ""
+    upload_date: str = ""  # YYYY-MM-DD format
+    webpage_url: str = ""
+    duration: int = 0  # seconds
+    tags: list[str] | None = None
+
+
+@dataclass
+class DownloadResult:
+    """Result of audio download with metadata."""
+    audio_path: str
+    metadata: Optional[VideoMetadata] = None
+
+
 class DownloadError(Exception):
     """Exception raised for audio download errors."""
 
@@ -27,7 +47,7 @@ async def download_audio(
     url: str,
     output_dir: str | None = None,
     on_status: Callable[[str], None] | None = None,
-) -> str:
+) -> DownloadResult:
     """
     Download audio from a video URL (YouTube, Bilibili, or Apple Podcasts).
 
@@ -37,7 +57,7 @@ async def download_audio(
         on_status: Optional callback to report status updates
 
     Returns:
-        Path to the downloaded audio file
+        DownloadResult containing path to the downloaded audio file and metadata
 
     Raises:
         DownloadError: If the video ID cannot be extracted or download fails
@@ -86,7 +106,7 @@ async def download_audio(
     # Run yt-dlp in a thread pool to avoid blocking
     loop = asyncio.get_event_loop()
     try:
-        output_path = await loop.run_in_executor(
+        output_path, metadata = await loop.run_in_executor(
             None, lambda: _download_with_ytdlp(url, ydl_opts, video_id, output_dir)
         )
     except Exception as e:
@@ -96,14 +116,20 @@ async def download_audio(
         raise DownloadError(f"Downloaded file not found: {output_path}")
 
     logger.info(f"Audio downloaded: {output_path}")
-    return output_path
+    if metadata:
+        logger.info(f"Video metadata: {metadata.title} by {metadata.channel}")
+
+    return DownloadResult(audio_path=output_path, metadata=metadata)
 
 
 def _download_with_ytdlp(
     url: str, ydl_opts: dict, video_id: str, output_dir: str
-) -> str:
+) -> tuple[str, Optional[VideoMetadata]]:
     """
     Download audio using yt-dlp (synchronous function for thread pool).
+
+    Returns:
+        Tuple of (output_path, metadata)
     """
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         # Extract info first to get the actual output filename
@@ -111,6 +137,9 @@ def _download_with_ytdlp(
 
         if info is None:
             raise DownloadError("Failed to extract video info")
+
+        # Extract metadata from info dict
+        metadata = _extract_metadata(info)
 
         # The output file should be video_id.mp3 after postprocessing
         output_path = os.path.join(output_dir, f"{video_id}.mp3")
@@ -123,7 +152,47 @@ def _download_with_ytdlp(
                     output_path = candidate
                     break
 
-        return output_path
+        return output_path, metadata
+
+
+def _extract_metadata(info: dict) -> Optional[VideoMetadata]:
+    """
+    Extract VideoMetadata from yt-dlp info dict.
+
+    Args:
+        info: The info dict returned by yt-dlp extract_info()
+
+    Returns:
+        VideoMetadata object or None if extraction fails
+    """
+    try:
+        title = info.get("title", "")
+        channel = info.get("channel") or info.get("uploader") or ""
+        description = info.get("description", "") or ""
+        webpage_url = info.get("webpage_url", "") or ""
+        duration = info.get("duration", 0) or 0
+
+        # Parse upload_date from YYYYMMDD to YYYY-MM-DD
+        upload_date_raw = info.get("upload_date", "")
+        upload_date = ""
+        if upload_date_raw and len(upload_date_raw) == 8:
+            upload_date = f"{upload_date_raw[:4]}-{upload_date_raw[4:6]}-{upload_date_raw[6:8]}"
+
+        # Get tags
+        tags = info.get("tags") or []
+
+        return VideoMetadata(
+            title=title,
+            channel=channel,
+            description=description,
+            upload_date=upload_date,
+            webpage_url=webpage_url,
+            duration=duration,
+            tags=tags if tags else None,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to extract metadata: {e}")
+        return None
 
 
 async def get_video_info(url: str) -> dict | None:

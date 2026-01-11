@@ -15,9 +15,9 @@ from aiogram.filters import Command
 from ..config import config
 from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_supported_url, get_url_platform, extract_video_id
 from ..utils import settings_store
-from ..services.downloader import download_audio
+from ..services.downloader import download_audio, DownloadResult, VideoMetadata
 from ..services.transcriber import transcribe, TranscriptionMetadata
-from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata
+from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata, VideoEditorMetadata
 from ..services.rss_parser import get_episode_metadata
 from ..services.pdf_generator import generate_pdf
 
@@ -513,15 +513,42 @@ async def _process_video_url(
 
         # Download audio
         await status_message.edit_text(f"Downloading audio from {platform_name}...")
-        audio_path = await download_audio(url, request_temp_dir)
+        download_result = await download_audio(url, request_temp_dir)
+        audio_path = download_result.audio_path
+        video_metadata = download_result.metadata
+
+        if video_metadata:
+            logger.info(f"Got video metadata: {video_metadata.title} by {video_metadata.channel}")
+
+        # Convert VideoMetadata to TranscriptionMetadata for transcriber
+        transcription_metadata = None
+        if video_metadata:
+            transcription_metadata = TranscriptionMetadata(
+                source_name=video_metadata.channel,
+                title=video_metadata.title,
+                publish_date=video_metadata.upload_date,
+                description=video_metadata.description,
+            )
 
         # Transcribe
         await status_message.edit_text("Transcribing audio...")
         raw_transcript = await transcribe(
             audio_path,
             transcriber_config,
+            metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
         )
+
+        # Convert VideoMetadata to VideoEditorMetadata for editor
+        editor_metadata = None
+        if video_metadata:
+            editor_metadata = VideoEditorMetadata(
+                title=video_metadata.title,
+                channel=video_metadata.channel,
+                description=video_metadata.description,
+                upload_date=video_metadata.upload_date,
+                webpage_url=video_metadata.webpage_url,
+            )
 
         # Edit/format
         await status_message.edit_text("Formatting transcript...")
@@ -529,14 +556,20 @@ async def _process_video_url(
             raw_transcript,
             editor_config,
             enable_translation=enable_translation,
+            metadata=editor_metadata,
             on_status=lambda s: logger.info(s),
         )
 
         # Generate output files
         await status_message.edit_text("Generating output files...")
 
-        # Extract title from transcript for filename
-        title = extract_title_from_transcript(edited_transcript)
+        # Use video title from metadata for filename, fallback to extracted title
+        title = None
+        if video_metadata and video_metadata.title:
+            title = video_metadata.title
+        else:
+            title = extract_title_from_transcript(edited_transcript)
+
         if title:
             # Sanitize the title for use as filename
             safe_title = sanitize_filename(title, max_length=30)
@@ -616,7 +649,8 @@ async def _process_apple_podcast(
 
     # Step 2: Download audio
     await status_message.edit_text("Downloading podcast audio...")
-    audio_path = await download_audio(url, request_temp_dir)
+    download_result = await download_audio(url, request_temp_dir)
+    audio_path = download_result.audio_path
 
     # Step 3: Transcribe with metadata context
     await status_message.edit_text("Transcribing podcast...")
@@ -625,10 +659,10 @@ async def _process_apple_podcast(
     transcription_metadata = None
     if episode_metadata:
         transcription_metadata = TranscriptionMetadata(
-            podcast_name=episode_metadata.podcast_name,
-            episode_title=episode_metadata.episode_title,
+            source_name=episode_metadata.podcast_name,
+            title=episode_metadata.episode_title,
             publish_date=episode_metadata.publish_date,
-            shownotes=episode_metadata.shownotes,
+            description=episode_metadata.shownotes,
         )
 
     raw_transcript = await transcribe(

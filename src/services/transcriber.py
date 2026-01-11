@@ -37,7 +37,7 @@ TRANSCRIPTION_PROMPT = (
 # Podcast transcription prompt template (with metadata context)
 PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptionist. Transcribe the following audio accurately and verbatim.
 
-## Podcast Context
+## Media Context
 {metadata_section}
 
 ## Guidelines:
@@ -49,7 +49,7 @@ PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptioni
 - Do not add explanations or commentary
 - Do not translate - keep the original language
 - Include speaker changes when clearly identifiable
-- Use the speaker names from the podcast context when identifiable, otherwise use "Speaker 1:", "Speaker 2:", etc.
+- Use the speaker names from the context when identifiable, otherwise use "Speaker 1:", "Speaker 2:", etc.
 - For unclear audio, use [inaudible] or [unclear]
 
 Output the complete transcript only."""
@@ -57,11 +57,29 @@ Output the complete transcript only."""
 
 @dataclass
 class TranscriptionMetadata:
-    """Metadata passed to transcriber for context (podcast mode)."""
-    podcast_name: str
-    episode_title: str
+    """
+    Metadata passed to transcriber for context.
+
+    Works with both podcast episodes and video sources (YouTube/Bilibili).
+    """
+    # Generic fields that work for both podcast and video
+    source_name: str  # Podcast name or Channel name
+    title: str  # Episode title or Video title
     publish_date: str = ""
-    shownotes: str = ""  # Episode description for context
+    description: str = ""  # Episode shownotes or Video description
+
+    # Legacy aliases for backward compatibility
+    @property
+    def podcast_name(self) -> str:
+        return self.source_name
+
+    @property
+    def episode_title(self) -> str:
+        return self.title
+
+    @property
+    def shownotes(self) -> str:
+        return self.description
 
 
 def _build_transcription_prompt(metadata: Optional[TranscriptionMetadata]) -> str:
@@ -71,17 +89,13 @@ def _build_transcription_prompt(metadata: Optional[TranscriptionMetadata]) -> st
 
     # Build metadata section
     metadata_lines = [
-        f"- Podcast Name: {metadata.podcast_name}",
-        f"- Episode Title: {metadata.episode_title}",
+        f"- Source: {metadata.source_name}",
+        f"- Title: {metadata.title}",
     ]
     if metadata.publish_date:
-        metadata_lines.append(f"- Publish Date: {metadata.publish_date}")
-    if metadata.shownotes:
-        # Truncate shownotes to avoid overwhelming the prompt
-        shownotes_truncated = metadata.shownotes[:2000]
-        if len(metadata.shownotes) > 2000:
-            shownotes_truncated += "..."
-        metadata_lines.append(f"- Episode Description: {shownotes_truncated}")
+        metadata_lines.append(f"- Date: {metadata.publish_date}")
+    if metadata.description:
+        metadata_lines.append(f"- Description: {metadata.description}")
 
     metadata_section = "\n".join(metadata_lines)
     return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(metadata_section=metadata_section)

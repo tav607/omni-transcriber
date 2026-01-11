@@ -1,8 +1,15 @@
+"""Audio transcription using Gemini API with chunking support."""
+
 import asyncio
 import re
 import logging
 import os
-from typing import Callable
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, List, Optional
 
 from google import genai
 from google.genai import types
@@ -12,6 +19,13 @@ from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
+# Audio splitting constants
+MAX_DURATION_MINUTES = 90
+OVERLAP_SECONDS = 10
+MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # 90 minutes in milliseconds
+OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
+
+# Default transcription prompt (for non-podcast sources)
 TRANSCRIPTION_PROMPT = (
     "Transcribe this audio verbatim. If the language is Chinese, please use Simplified "
     "Chinese characters. Provide only the direct transcription text without any "
@@ -19,6 +33,68 @@ TRANSCRIPTION_PROMPT = (
     "IMPORTANT: Transcribe exactly what is spoken. Do NOT correct or change "
     "product names, version numbers, or technical terms — even if they seem incorrect or unfamiliar."
 )
+
+# Podcast transcription prompt template (with metadata context)
+PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptionist. Transcribe the following audio accurately and verbatim.
+
+## Podcast Context
+{metadata_section}
+
+## Guidelines:
+- Transcribe exactly what is said, preserving the original language
+- Preserve technical terms, proper nouns, and company names exactly as spoken
+- Use appropriate punctuation and paragraph breaks for readability
+- If the audio is in Chinese, output in Simplified Chinese (简体中文)
+- If the audio is in English, output in English
+- Do not add explanations or commentary
+- Do not translate - keep the original language
+- Include speaker changes when clearly identifiable
+- Use the speaker names from the podcast context when identifiable, otherwise use "Speaker 1:", "Speaker 2:", etc.
+- For unclear audio, use [inaudible] or [unclear]
+
+Output the complete transcript only."""
+
+
+@dataclass
+class TranscriptionMetadata:
+    """Metadata passed to transcriber for context (podcast mode)."""
+    podcast_name: str
+    episode_title: str
+    publish_date: str = ""
+    shownotes: str = ""  # Episode description for context
+
+
+def _build_transcription_prompt(metadata: Optional[TranscriptionMetadata]) -> str:
+    """Build transcription prompt with optional metadata context."""
+    if metadata is None:
+        return TRANSCRIPTION_PROMPT
+
+    # Build metadata section
+    metadata_lines = [
+        f"- Podcast Name: {metadata.podcast_name}",
+        f"- Episode Title: {metadata.episode_title}",
+    ]
+    if metadata.publish_date:
+        metadata_lines.append(f"- Publish Date: {metadata.publish_date}")
+    if metadata.shownotes:
+        # Truncate shownotes to avoid overwhelming the prompt
+        shownotes_truncated = metadata.shownotes[:2000]
+        if len(metadata.shownotes) > 2000:
+            shownotes_truncated += "..."
+        metadata_lines.append(f"- Episode Description: {shownotes_truncated}")
+
+    metadata_section = "\n".join(metadata_lines)
+    return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(metadata_section=metadata_section)
+
+# MIME type mapping
+MIME_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
 
 
 def cleanup_repetitive_characters(text: str, max_repeats: int = 10) -> str:
@@ -42,17 +118,164 @@ def cleanup_repetitive_characters(text: str, max_repeats: int = 10) -> str:
     return re.sub(pattern, replacer, text)
 
 
+def _get_audio_duration(audio_path: Path) -> int:
+    """
+    Get audio duration in milliseconds using ffprobe.
+
+    Args:
+        audio_path: Path to audio file
+
+    Returns:
+        Duration in milliseconds
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(audio_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+    duration_seconds = float(result.stdout.strip())
+    return int(duration_seconds * 1000)
+
+
+def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
+    """
+    Split audio file into chunks using ffmpeg with stream copy (no re-encoding).
+
+    Args:
+        audio_path: Path to original audio file
+        output_dir: Directory to save audio chunks
+
+    Returns:
+        Tuple of (list of paths to audio chunks, duration in milliseconds).
+        If audio is shorter than threshold, returns ([original_path], duration).
+    """
+    # Get duration first
+    duration_ms = _get_audio_duration(audio_path)
+
+    if duration_ms <= MAX_DURATION_MS:
+        return [audio_path], duration_ms
+
+    # Defensive check
+    if OVERLAP_MS >= MAX_DURATION_MS:
+        raise ValueError(
+            f"OVERLAP_MS ({OVERLAP_MS}) must be less than MAX_DURATION_MS ({MAX_DURATION_MS})."
+        )
+
+    chunks = []
+    chunk_index = 0
+    start_ms = 0
+    ext = audio_path.suffix
+
+    while start_ms < duration_ms:
+        end_ms = min(start_ms + MAX_DURATION_MS, duration_ms)
+        chunk_duration_ms = end_ms - start_ms
+
+        chunk_path = output_dir / f"chunk_{chunk_index:03d}{ext}"
+
+        # Use ffmpeg with stream copy (very fast, no re-encoding)
+        cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-ss", str(start_ms / 1000),  # Start time in seconds
+            "-i", str(audio_path),
+            "-t", str(chunk_duration_ms / 1000),  # Duration in seconds
+            "-c", "copy",  # Stream copy, no re-encoding
+            "-avoid_negative_ts", "1",
+            str(chunk_path),
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg split failed: {result.stderr}")
+
+        chunks.append(chunk_path)
+        chunk_index += 1
+
+        # If this chunk reached the end, we're done
+        if end_ms >= duration_ms:
+            break
+
+        # Next chunk starts OVERLAP_SECONDS before the end of current chunk
+        start_ms = end_ms - OVERLAP_MS
+
+    logger.info(f"Split audio into {len(chunks)} chunks of ~{MAX_DURATION_MINUTES} minutes each")
+    return chunks, duration_ms
+
+
+def _merge_transcriptions(transcripts: List[str]) -> str:
+    """
+    Merge multiple transcript chunks, handling the overlap regions.
+
+    Uses sentence boundary detection to find and remove duplicated content
+    at chunk boundaries.
+
+    Args:
+        transcripts: List of transcript strings to merge
+
+    Returns:
+        Merged transcript string
+    """
+    if len(transcripts) == 1:
+        return transcripts[0]
+
+    merged = transcripts[0]
+
+    for i in range(1, len(transcripts)):
+        current = transcripts[i]
+
+        # Extract overlap search regions
+        # 10 seconds of audio ≈ 30-80 Chinese chars or 20-50 English words
+        # Use 500 chars to have sufficient margin
+        overlap_search_len = 500
+        prev_end = merged[-overlap_search_len:] if len(merged) > overlap_search_len else merged
+        curr_start = current[:overlap_search_len] if len(current) > overlap_search_len else current
+
+        best_match_pos = -1
+        best_match_len = 0
+
+        # Look for sentence boundaries in the overlap region
+        # Support both Chinese and English punctuation
+        sentences_prev = re.split(r'[。！？\.\!\?]', prev_end)
+        for sent in sentences_prev:
+            sent = sent.strip()
+            if len(sent) > 20 and sent in curr_start:
+                pos = curr_start.find(sent)
+                if pos >= 0 and len(sent) > best_match_len:
+                    best_match_pos = pos
+                    best_match_len = len(sent)
+
+        if best_match_pos >= 0:
+            # Found overlap, skip the duplicated part
+            current = current[best_match_pos + best_match_len:].lstrip()
+            logger.debug(f"Found overlap of {best_match_len} chars at chunk {i}")
+        else:
+            # No clear overlap found, just concatenate with newline
+            logger.debug(f"No clear overlap found at chunk {i}, concatenating")
+
+        merged = merged + "\n\n" + current
+
+    return merged
+
+
 async def transcribe(
     audio_path: str,
     config: TranscriberConfig,
+    metadata: Optional[TranscriptionMetadata] = None,
     on_status: Callable[[str], None] | None = None,
 ) -> str:
     """
     Transcribe audio file using Gemini API.
+    Supports automatic chunking for audio longer than 90 minutes.
 
     Args:
         audio_path: Path to the audio file to transcribe
         config: Transcriber configuration
+        metadata: Optional metadata for podcast mode (provides context for better transcription)
         on_status: Optional callback to report status updates
 
     Returns:
@@ -69,82 +292,126 @@ async def transcribe(
         http_options={"base_url": "https://generativelanguage.googleapis.com"},
     )
 
-    # Get MIME type based on file extension
-    ext = os.path.splitext(audio_path)[1].lower()
-    mime_types = {
-        ".mp3": "audio/mpeg",
-        ".m4a": "audio/mp4",
-        ".wav": "audio/wav",
-        ".webm": "audio/webm",
-        ".ogg": "audio/ogg",
-        ".flac": "audio/flac",
-    }
-    mime_type = mime_types.get(ext, "audio/mpeg")
+    audio_path_obj = Path(audio_path)
+    if not audio_path_obj.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    # Upload audio file
-    logger.info("Uploading audio to Gemini File API...")
-    if on_status:
-        on_status("Uploading audio...")
-
-    uploaded_file = await with_retry(
-        lambda: _upload_file(client, audio_path, mime_type),
-        max_attempts=3,
-        base_delay_ms=1000,
-        context="File upload",
-    )
-    logger.info(f"Audio uploaded: {uploaded_file.name}")
-
-    # Configure thinking based on level
-    thinking_budget = 1024 if config.thinking_level == "low" else 8192
-
-    # Transcribe with retry support
-    if on_status:
-        on_status("Transcribing...")
+    chunk_paths: List[Path] = []
+    temp_dir = None
+    uploaded_files: List[types.File] = []
 
     try:
-        full_text = await with_retry(
-            lambda: _transcribe_audio(
-                client,
-                uploaded_file,
-                config.model,
-                config.temperature,
-                thinking_budget,
-            ),
-            max_attempts=3,
-            base_delay_ms=1000,
-            context="Transcription",
-        )
-        logger.info(f"Transcription completed, text length: {len(full_text)}")
-    finally:
-        # Always clean up uploaded file
-        logger.info("Cleaning up uploaded file...")
+        # Split audio if needed (uses ffmpeg, very fast)
+        temp_dir = Path(tempfile.mkdtemp(prefix="omni_chunks_"))
+        chunk_paths, duration_ms = _split_audio(audio_path_obj, temp_dir)
+        duration_minutes = duration_ms // 60000
+        needs_splitting = len(chunk_paths) > 1
+
+        if needs_splitting:
+            if on_status:
+                on_status(f"Audio is {duration_minutes} minutes, split into {len(chunk_paths)} chunks")
+            logger.info(f"Split audio into {len(chunk_paths)} chunks")
+        else:
+            # No splitting needed, use original file directly
+            chunk_paths = [audio_path_obj]
+            if on_status:
+                on_status(f"Audio is {duration_minutes} minutes, processing as single file...")
+
+        # Configure thinking based on level
+        thinking_budget = 1024 if config.thinking_level == "low" else 8192
+
+        # Get MIME type based on file extension
+        ext = audio_path_obj.suffix.lower()
+        mime_type = MIME_TYPES.get(ext, "audio/mpeg")
+
+        # Step 1: Upload all chunks in parallel
         if on_status:
-            on_status("Cleaning up...")
-        try:
-            await _delete_file(client, uploaded_file.name)
-            logger.info("Uploaded file cleaned up")
-        except Exception:
-            logger.warning(
-                "Failed to clean up uploaded file, it may remain on Gemini servers"
+            if len(chunk_paths) > 1:
+                on_status(f"Uploading {len(chunk_paths)} audio chunks...")
+            else:
+                on_status("Uploading audio...")
+
+        logger.info("Uploading audio to Gemini File API...")
+
+        async def upload_chunk(chunk_path: Path) -> types.File:
+            chunk_mime = MIME_TYPES.get(chunk_path.suffix.lower(), mime_type)
+            return await with_retry(
+                lambda: _upload_file(client, str(chunk_path), chunk_mime),
+                max_attempts=3,
+                base_delay_ms=1000,
+                context=f"File upload {chunk_path.name}",
             )
 
-    # Clean up repetitive characters
-    logger.info("Cleaning up repetitive characters...")
-    before_cleanup = len(full_text)
-    full_text = cleanup_repetitive_characters(full_text)
-    after_cleanup = len(full_text)
-    cleanup_reduction = before_cleanup - after_cleanup
+        upload_tasks = [upload_chunk(p) for p in chunk_paths]
+        uploaded_files = await asyncio.gather(*upload_tasks)
+        logger.info(f"Uploaded {len(uploaded_files)} files")
 
-    if cleanup_reduction > 0:
-        logger.info(
-            f"Cleanup completed. Removed {cleanup_reduction} repetitive characters "
-            f"({cleanup_reduction / before_cleanup * 100:.1f}%)"
-        )
-    else:
-        logger.info("Cleanup completed. No repetitive characters found.")
+        # Step 2: Transcribe all chunks in parallel
+        if on_status:
+            if len(chunk_paths) > 1:
+                on_status(f"Transcribing {len(chunk_paths)} chunks in parallel...")
+            else:
+                on_status("Transcribing...")
 
-    logger.info("Transcription process completed!")
-    return full_text
+        async def transcribe_chunk(uploaded_file: types.File) -> str:
+            return await with_retry(
+                lambda: _transcribe_audio(
+                    client,
+                    uploaded_file,
+                    config.model,
+                    config.temperature,
+                    thinking_budget,
+                    metadata,
+                ),
+                max_attempts=3,
+                base_delay_ms=1000,
+                context="Transcription",
+            )
+
+        transcribe_tasks = [transcribe_chunk(f) for f in uploaded_files]
+        transcripts = await asyncio.gather(*transcribe_tasks)
+        logger.info(f"Transcribed {len(transcripts)} chunks")
+
+        # Step 3: Clean up each transcript
+        transcripts = [cleanup_repetitive_characters(t) for t in transcripts]
+
+        # Step 4: Merge if multiple chunks
+        if len(transcripts) > 1:
+            if on_status:
+                on_status("Merging transcriptions...")
+            full_text = _merge_transcriptions(transcripts)
+        else:
+            full_text = transcripts[0]
+
+        logger.info(f"Transcription completed, text length: {len(full_text)}")
+
+        if on_status:
+            on_status("Transcription complete")
+
+        logger.info("Transcription process completed!")
+        return full_text
+
+    finally:
+        # Always clean up uploaded files
+        logger.info("Cleaning up uploaded files...")
+        if on_status:
+            on_status("Cleaning up...")
+
+        for uploaded_file in uploaded_files:
+            try:
+                await _delete_file(client, uploaded_file.name)
+            except Exception:
+                logger.warning(
+                    f"Failed to clean up uploaded file {uploaded_file.name}"
+                )
+
+        # Cleanup temp directory if created
+        if temp_dir and temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+                logger.debug(f"Cleaned up temp directory: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
 
 
 async def _upload_file(
@@ -164,9 +431,13 @@ async def _transcribe_audio(
     model: str,
     temperature: float,
     thinking_budget: int,
+    metadata: Optional[TranscriptionMetadata] = None,
 ) -> str:
     """Transcribe audio using Gemini model."""
-    logger.info("Processing transcription...")
+    logger.info(f"Processing transcription for {uploaded_file.name}...")
+
+    # Build prompt with or without metadata context
+    prompt = _build_transcription_prompt(metadata)
 
     def _generate():
         return client.models.generate_content(
@@ -175,7 +446,7 @@ async def _transcribe_audio(
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_text(text=TRANSCRIPTION_PROMPT),
+                        types.Part.from_text(text=prompt),
                         types.Part.from_uri(
                             file_uri=uploaded_file.uri,
                             mime_type=uploaded_file.mime_type,

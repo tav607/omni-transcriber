@@ -16,8 +16,9 @@ from ..config import config
 from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_supported_url, get_url_platform, extract_video_id
 from ..utils import settings_store
 from ..services.downloader import download_audio
-from ..services.transcriber import transcribe
-from ..services.editor import edit
+from ..services.transcriber import transcribe, TranscriptionMetadata
+from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata
+from ..services.rss_parser import get_episode_metadata
 from ..services.pdf_generator import generate_pdf
 
 logger = logging.getLogger(__name__)
@@ -460,7 +461,7 @@ async def handle_text(message: Message):
 async def _process_video_url(
     message: Message, url: str, status_message: Message, platform: str
 ) -> None:
-    """Process a video URL (YouTube/Bilibili) and send the transcript."""
+    """Process a video URL (YouTube/Bilibili/Apple Podcasts) and send the transcript."""
     # Get user settings
     chat_id = message.chat.id
     enable_translation = settings_store.get(chat_id, "translation", False)
@@ -491,6 +492,25 @@ async def _process_video_url(
     platform_name = platform_names.get(platform, "source")
 
     try:
+        # ============================================
+        # Apple Podcasts: Use specialized podcast mode
+        # ============================================
+        if platform == "apple_podcasts":
+            await _process_apple_podcast(
+                message=message,
+                url=url,
+                status_message=status_message,
+                transcriber_config=transcriber_config,
+                editor_config=editor_config,
+                request_temp_dir=request_temp_dir,
+                chat_id=chat_id,
+            )
+            return
+
+        # ============================================
+        # YouTube/Bilibili: Use standard processing
+        # ============================================
+
         # Download audio
         await status_message.edit_text(f"Downloading audio from {platform_name}...")
         audio_path = await download_audio(url, request_temp_dir)
@@ -566,6 +586,135 @@ async def _process_video_url(
             shutil.rmtree(request_temp_dir)
         except Exception:
             pass
+
+
+async def _process_apple_podcast(
+    message: Message,
+    url: str,
+    status_message: Message,
+    transcriber_config,
+    editor_config,
+    request_temp_dir: str,
+    chat_id: int,
+) -> None:
+    """
+    Process an Apple Podcast URL using specialized podcast mode.
+
+    This uses:
+    - Episode metadata for context (podcast name, title, shownotes)
+    - Podcast-specific transcription prompt
+    - Podcast-specific editor with structured output (Info, Summary, Takeaways, Q&A, Highlights)
+    """
+    # Step 1: Get episode metadata from RSS feed
+    await status_message.edit_text("Fetching podcast metadata...")
+    episode_metadata = await get_episode_metadata(url)
+
+    if episode_metadata:
+        logger.info(f"Got podcast metadata: {episode_metadata.podcast_name} - {episode_metadata.episode_title}")
+    else:
+        logger.warning("Could not get podcast metadata, proceeding without context")
+
+    # Step 2: Download audio
+    await status_message.edit_text("Downloading podcast audio...")
+    audio_path = await download_audio(url, request_temp_dir)
+
+    # Step 3: Transcribe with metadata context
+    await status_message.edit_text("Transcribing podcast...")
+
+    # Convert to TranscriptionMetadata for transcriber
+    transcription_metadata = None
+    if episode_metadata:
+        transcription_metadata = TranscriptionMetadata(
+            podcast_name=episode_metadata.podcast_name,
+            episode_title=episode_metadata.episode_title,
+            publish_date=episode_metadata.publish_date,
+            shownotes=episode_metadata.shownotes,
+        )
+
+    raw_transcript = await transcribe(
+        audio_path,
+        transcriber_config,
+        metadata=transcription_metadata,
+        on_status=lambda s: logger.info(s),
+    )
+
+    # Step 4: Edit with podcast mode (structured output)
+    await status_message.edit_text("Formatting transcript (podcast mode)...")
+
+    # Convert to PodcastEpisodeMetadata for editor
+    editor_metadata = None
+    if episode_metadata:
+        editor_metadata = PodcastEpisodeMetadata(
+            podcast_name=episode_metadata.podcast_name,
+            episode_title=episode_metadata.episode_title,
+            episode_link=episode_metadata.episode_link,
+            publish_date=episode_metadata.publish_date,
+            shownotes=episode_metadata.shownotes,
+        )
+
+    edited_result = await edit_podcast(
+        raw_transcript,
+        editor_config,
+        metadata=editor_metadata,
+        on_status=lambda s: logger.info(s),
+    )
+
+    # Step 5: Generate output files
+    await status_message.edit_text("Generating output files...")
+
+    # Use podcast title for filename
+    if editor_metadata:
+        safe_title = sanitize_filename(
+            f"{editor_metadata.podcast_name}_{editor_metadata.episode_title}",
+            max_length=40
+        )
+    else:
+        safe_title = sanitize_filename(edited_result.title, max_length=40) or "podcast"
+
+    # Add date stamp
+    date_stamp = datetime.now().strftime("%Y%m%d")
+    output_filename = f"{safe_title}_{date_stamp}"
+
+    # Save Markdown (use the structured markdown from podcast result)
+    md_path = os.path.join(request_temp_dir, "transcript.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(edited_result.markdown)
+
+    # Generate PDF
+    pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
+    await generate_pdf(edited_result.markdown, pdf_path)
+
+    # Upload to rclone if enabled for this user
+    rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
+
+    # Send files
+    await status_message.edit_text("Sending files...")
+
+    pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+
+    # Only send .md if rclone upload was not successful
+    if not rclone_uploaded:
+        md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
+        await message.answer_document(md_file, caption="Markdown transcript")
+
+    await message.answer_document(pdf_file, caption="PDF transcript")
+
+    # Show summary in status message
+    summary_preview = edited_result.summary[:200] + "..." if len(edited_result.summary) > 200 else edited_result.summary
+    stats = f"Takeaways: {len(edited_result.takeaways)} | Q&A: {len(edited_result.qa_pairs)} | Highlights: {len(edited_result.highlights)}"
+
+    if rclone_uploaded:
+        await status_message.edit_text(
+            f"Done! Your podcast transcript is ready. (Markdown synced to Dropbox)\n\n"
+            f"*{stats}*",
+            parse_mode="Markdown",
+        )
+    else:
+        await status_message.edit_text(
+            f"Done! Your podcast transcript is ready.\n\n"
+            f"*{stats}*",
+            parse_mode="Markdown",
+        )
 
 
 async def _process_audio_file(

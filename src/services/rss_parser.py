@@ -1,0 +1,240 @@
+"""RSS feed parser for Apple Podcasts metadata extraction."""
+
+import asyncio
+import hashlib
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+
+import aiohttp
+import feedparser
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; OmniTranscriber/1.0)"
+
+
+@dataclass
+class EpisodeMetadata:
+    """Metadata about a podcast episode."""
+    podcast_name: str
+    episode_title: str
+    episode_link: str = ""
+    publish_date: str = ""
+    shownotes: str = ""  # Episode description for context
+    audio_url: str = ""
+
+
+def extract_podcast_id(apple_url: str) -> Optional[str]:
+    """
+    Extract podcast ID from Apple Podcast URL.
+
+    Examples:
+        https://podcasts.apple.com/cn/podcast/硅谷101/id1498541229
+        https://podcasts.apple.com/us/podcast/lex-fridman-podcast/id1434243584
+        https://podcasts.apple.com/us/podcast/.../id1434243584?i=1000123456789
+    """
+    match = re.search(r'/id(\d+)', apple_url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def extract_episode_id(apple_url: str) -> Optional[str]:
+    """
+    Extract episode ID from Apple Podcast URL (if present).
+
+    Example:
+        https://podcasts.apple.com/us/podcast/.../id1434243584?i=1000123456789
+        -> episode_id = 1000123456789
+    """
+    match = re.search(r'[?&]i=(\d+)', apple_url)
+    if match:
+        return match.group(1)
+    return None
+
+
+async def get_feed_url(podcast_id: str) -> Optional[str]:
+    """
+    Get RSS feed URL from Apple iTunes API.
+
+    Args:
+        podcast_id: The numeric Apple Podcast ID
+
+    Returns:
+        RSS feed URL if found, None otherwise
+    """
+    lookup_url = f"https://itunes.apple.com/lookup?id={podcast_id}&entity=podcast"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        headers = {"User-Agent": DEFAULT_USER_AGENT}
+
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(lookup_url) as response:
+                if response.status != 200:
+                    logger.error(f"iTunes API returned status {response.status}")
+                    return None
+
+                data = await response.json(content_type=None)
+
+                if data.get("resultCount", 0) == 0:
+                    logger.warning(f"No podcast found for ID {podcast_id}")
+                    return None
+
+                result = data["results"][0]
+                feed_url = result.get("feedUrl")
+
+                if feed_url:
+                    logger.debug(f"Found feed URL for podcast {podcast_id}: {feed_url}")
+                    return feed_url
+                else:
+                    logger.warning(f"No feedUrl in response for podcast {podcast_id}")
+                    return None
+
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching feed URL for podcast {podcast_id}")
+        return None
+    except aiohttp.ClientError as e:
+        logger.error(f"HTTP error fetching feed URL: {e}")
+        return None
+
+
+async def fetch_feed_content(feed_url: str) -> Optional[str]:
+    """Fetch RSS feed content."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        headers = {"User-Agent": DEFAULT_USER_AGENT}
+
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(feed_url) as response:
+                if response.status != 200:
+                    logger.error(f"HTTP {response.status} for {feed_url}")
+                    return None
+                return await response.text()
+
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching feed {feed_url}")
+        return None
+    except aiohttp.ClientError as e:
+        logger.error(f"HTTP error fetching feed: {e}")
+        return None
+
+
+async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:
+    """
+    Get episode metadata from an Apple Podcast URL.
+
+    This function:
+    1. Extracts podcast ID from URL
+    2. Gets RSS feed URL from iTunes API
+    3. Parses RSS feed to find the specific episode
+    4. Returns metadata for the episode
+
+    Args:
+        apple_url: Apple Podcast episode URL
+
+    Returns:
+        EpisodeMetadata if found, None otherwise
+    """
+    # Extract podcast ID
+    podcast_id = extract_podcast_id(apple_url)
+    if not podcast_id:
+        logger.error(f"Could not extract podcast ID from URL: {apple_url}")
+        return None
+
+    # Extract episode ID (if present in URL)
+    target_episode_id = extract_episode_id(apple_url)
+
+    # Get feed URL
+    feed_url = await get_feed_url(podcast_id)
+    if not feed_url:
+        logger.error(f"Could not get feed URL for podcast {podcast_id}")
+        return None
+
+    # Fetch and parse feed
+    content = await fetch_feed_content(feed_url)
+    if not content:
+        logger.error(f"Failed to fetch feed {feed_url}")
+        return None
+
+    try:
+        feed = feedparser.parse(content)
+
+        if feed.bozo and feed.bozo_exception:
+            logger.warning(f"Feed parsing warning: {feed.bozo_exception}")
+
+        podcast_name = feed.feed.get("title", "Unknown Podcast")
+
+        # If we have a target episode ID, try to find that specific episode
+        # Otherwise, return the most recent episode
+        target_entry = None
+
+        for entry in feed.entries:
+            # Check if this is the target episode by ID
+            if target_episode_id:
+                # iTunes episode ID might be in guid or other fields
+                entry_id = entry.get("id", "") or entry.get("guid", "")
+                if target_episode_id in str(entry_id):
+                    target_entry = entry
+                    break
+
+        # If no specific episode found, use the first (most recent) entry
+        if target_entry is None and feed.entries:
+            target_entry = feed.entries[0]
+            if target_episode_id:
+                logger.warning(f"Could not find episode {target_episode_id}, using most recent")
+
+        if target_entry is None:
+            logger.error("No episodes found in feed")
+            return None
+
+        # Extract audio URL
+        audio_url = ""
+        for enclosure in target_entry.get("enclosures", []):
+            if enclosure.get("type", "").startswith("audio/"):
+                audio_url = enclosure.get("href") or enclosure.get("url", "")
+                break
+
+        # Parse published date
+        publish_date = ""
+        try:
+            if hasattr(target_entry, "published_parsed") and target_entry.published_parsed:
+                dt = datetime(*target_entry.published_parsed[:6])
+                publish_date = dt.strftime("%Y-%m-%d")
+            elif hasattr(target_entry, "updated_parsed") and target_entry.updated_parsed:
+                dt = datetime(*target_entry.updated_parsed[:6])
+                publish_date = dt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            pass
+
+        # Get description/shownotes
+        shownotes = (
+            target_entry.get("summary") or
+            target_entry.get("description") or
+            (target_entry.get("content", [{}])[0].get("value", "") if target_entry.get("content") else "")
+        )
+
+        # Clean HTML from shownotes
+        shownotes = re.sub(r"<[^>]+>", "", shownotes)
+        shownotes = shownotes.strip()[:2000]  # Limit length
+
+        episode_title = target_entry.get("title", "Untitled Episode")
+
+        metadata = EpisodeMetadata(
+            podcast_name=podcast_name,
+            episode_title=episode_title,
+            episode_link=apple_url,
+            publish_date=publish_date,
+            shownotes=shownotes,
+            audio_url=audio_url,
+        )
+
+        logger.info(f"Got metadata for episode: {podcast_name} - {episode_title}")
+        return metadata
+
+    except Exception as e:
+        logger.error(f"Failed to parse feed: {e}")
+        return None

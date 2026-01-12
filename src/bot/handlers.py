@@ -400,8 +400,11 @@ async def handle_audio(message: Message):
     logger.info(f"Received audio file: {file_name}")
     status_message = await message.answer("Received audio file. Processing...")
 
+    # Get caption for metadata context
+    caption = message.caption
+
     try:
-        await _process_audio_file(message, file, file_name, status_message)
+        await _process_audio_file(message, file, file_name, status_message, caption=caption)
     except Exception as e:
         logger.error(f"Error processing audio file: {e}", exc_info=True)
         await status_message.edit_text(f"Error processing audio file: {str(e)}")
@@ -759,9 +762,21 @@ async def _process_apple_podcast(
 
 
 async def _process_audio_file(
-    message: Message, file, file_name: str, status_message: Message
+    message: Message,
+    file,
+    file_name: str,
+    status_message: Message,
+    caption: str | None = None,
 ) -> None:
-    """Process an uploaded audio file and send the transcript."""
+    """Process an uploaded audio file and send the transcript.
+
+    Args:
+        message: The Telegram message containing the audio file
+        file: The audio file object
+        file_name: Name of the audio file
+        status_message: Status message to update with progress
+        caption: Optional caption from the Telegram message for metadata context
+    """
     # Get user settings
     chat_id = message.chat.id
     enable_translation = settings_store.get(chat_id, "translation", False)
@@ -801,11 +816,27 @@ async def _process_audio_file(
         # Download file
         await message.bot.download(file, destination=audio_path)
 
+        # Create metadata from caption if provided
+        transcription_metadata = None
+        editor_metadata = None
+        if caption:
+            transcription_metadata = TranscriptionMetadata(
+                source_name="Direct Upload",
+                title=base_name,
+                description=caption,
+            )
+            editor_metadata = VideoEditorMetadata(
+                title=base_name,
+                channel="Direct Upload",
+                description=caption,
+            )
+
         # Transcribe
         await status_message.edit_text("Transcribing audio...")
         raw_transcript = await transcribe(
             audio_path,
             transcriber_config,
+            metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
         )
 
@@ -815,6 +846,7 @@ async def _process_audio_file(
             raw_transcript,
             editor_config,
             enable_translation=enable_translation,
+            metadata=editor_metadata,
             on_status=lambda s: logger.info(s),
         )
 

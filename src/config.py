@@ -45,11 +45,24 @@ class RcloneConfig:
 
 
 @dataclass
+class RSSHubConfig:
+    """RSSHub configuration for podcast RSS fetching (e.g., Xiaoyuzhou)."""
+
+    base_url: str = ""  # e.g., "https://rsshub.example.com"
+    key: str = ""  # Optional access key
+
+    @property
+    def is_enabled(self) -> bool:
+        return bool(self.base_url)
+
+
+@dataclass
 class AppConfig:
     telegram: TelegramConfig
     transcriber: TranscriberConfig
     editor: EditorConfig
     rclone: RcloneConfig = field(default_factory=RcloneConfig)
+    rsshub: RSSHubConfig = field(default_factory=RSSHubConfig)
     temp_dir: str = "/tmp/omni_transcriber"
     log_level: str = "INFO"
 
@@ -199,11 +212,18 @@ def load_config() -> AppConfig:
         enabled_chat_ids=rclone_enabled_chat_ids,
     )
 
+    # Load RSSHub config (for Xiaoyuzhou podcast support)
+    rsshub = RSSHubConfig(
+        base_url=os.getenv("RSSHUB_BASE_URL", ""),
+        key=os.getenv("RSSHUB_KEY", ""),
+    )
+
     return AppConfig(
         telegram=telegram,
         transcriber=transcriber,
         editor=editor,
         rclone=rclone,
+        rsshub=rsshub,
         temp_dir=os.getenv("TEMP_DIR", "/tmp/omni_transcriber"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

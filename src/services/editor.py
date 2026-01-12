@@ -948,6 +948,30 @@ def _build_podcast_result(
     )
 
 
+def _get_link_text(url: str) -> str:
+    """Get appropriate link text based on URL domain.
+
+    Args:
+        url: The episode URL
+
+    Returns:
+        Appropriate link text for the platform
+    """
+    if not url:
+        return "Listen"
+    url_lower = url.lower()
+    if "xiaoyuzhoufm.com" in url_lower:
+        return "Listen on Xiaoyuzhoufm"
+    elif "podcasts.apple.com" in url_lower:
+        return "Listen on Apple Podcasts"
+    elif "spotify.com" in url_lower:
+        return "Listen on Spotify"
+    elif "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "Watch on YouTube"
+    else:
+        return "Listen"
+
+
 def _render_podcast_markdown(
     title: str,
     info: dict,
@@ -969,7 +993,8 @@ def _render_podcast_markdown(
         if info.get("episode"):
             lines.append(f"- **Episode**: {info['episode']}")
         if info.get("link"):
-            lines.append(f"- **Link**: [Listen on Apple Podcast]({info['link']})")
+            link_text = _get_link_text(info["link"])
+            lines.append(f"- **Link**: [{link_text}]({info['link']})")
         if info.get("publish_time"):
             lines.append(f"- **Publish Time**: {info['publish_time']}")
         lines.append("")

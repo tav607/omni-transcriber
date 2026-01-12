@@ -17,11 +17,12 @@ sudo apt install libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf2.0-0 libffi-de
 
 ## Architecture
 
-Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts URLs or uploaded files) using Google Gemini API, then outputs formatted Markdown and PDF files.
+Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou URLs or uploaded files) using Google Gemini API, then outputs formatted Markdown and PDF files.
 
 ### Processing Pipeline
 
-1. **Input**: YouTube/Bilibili/Apple Podcasts URL → `services/youtube.py` downloads audio via yt-dlp
+1. **Input**: YouTube/Bilibili/Apple Podcasts URL → `services/downloader.py` downloads audio via yt-dlp
+   **or** Xiaoyuzhou URL → `services/xiaoyuzhou_parser.py` fetches audio URL via RSSHub → `services/downloader.py` downloads
    **or** Audio file upload → downloaded from Telegram
 2. **Transcription**: `services/transcriber.py` uploads audio to Gemini File API, transcribes with Gemini model
 3. **Editing**: `services/editor.py` formats raw transcript into structured Markdown (Chinese summary + original language transcript)
@@ -33,8 +34,10 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts URLs o
 - `src/bot/handlers.py` - Telegram message handlers, orchestrates the pipeline, manages user settings
 - `src/bot/bot.py` - Bot initialization, command registration (whitelist-aware)
 - `src/bot/middleware.py` - Chat ID authorization middleware
+- `src/services/downloader.py` - Audio download via yt-dlp (YouTube/Bilibili/direct URLs)
+- `src/services/xiaoyuzhou_parser.py` - Xiaoyuzhou podcast metadata extraction via RSSHub
 - `src/utils/retry.py` - Retry wrapper for API calls
-- `src/utils/url_parser.py` - YouTube/Bilibili/Apple Podcasts URL detection
+- `src/utils/url_parser.py` - YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou URL detection
 
 ### Configuration
 
@@ -43,3 +46,4 @@ All config via environment variables (see `.env.example`). Key settings:
 - `TRANSCRIBER_MODEL` / `EDITOR_MODEL` - Gemini models (default: gemini-2.5-flash / gemini-2.5-pro)
 - `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - "low" or "high"
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
+- `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support

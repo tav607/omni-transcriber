@@ -10,6 +10,9 @@ BILIBILI_DOMAINS = frozenset(["bilibili.com", "b23.tv"])
 # Valid Apple Podcasts domains
 APPLE_PODCASTS_DOMAINS = frozenset(["podcasts.apple.com"])
 
+# Valid Xiaoyuzhou (小宇宙) domains
+XIAOYUZHOU_DOMAINS = frozenset(["xiaoyuzhoufm.com"])
+
 
 def _is_youtube_host(hostname: str) -> bool:
     """
@@ -305,9 +308,80 @@ def is_apple_podcasts_url(text: str) -> bool:
     return extract_apple_podcasts_id(text) is not None
 
 
+def _is_xiaoyuzhou_host(hostname: str) -> bool:
+    """
+    Check if a hostname is a valid Xiaoyuzhou (小宇宙) domain.
+    """
+    if not hostname:
+        return False
+
+    hostname = hostname.lower()
+
+    for domain in XIAOYUZHOU_DOMAINS:
+        if hostname == domain or hostname.endswith("." + domain):
+            return True
+
+    return False
+
+
+def extract_xiaoyuzhou_episode_id(url: str) -> str | None:
+    """
+    Extract Xiaoyuzhou episode ID from URL.
+
+    Supported formats:
+    - https://www.xiaoyuzhoufm.com/episode/xxxxxxxxxxxxxxxxxxxxxxxx
+
+    The episode ID is a 24-character hexadecimal string.
+
+    Args:
+        url: The Xiaoyuzhou URL to parse
+
+    Returns:
+        The episode ID or None if not found
+    """
+    if not url:
+        return None
+
+    url = url.strip()
+
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+
+        if not _is_xiaoyuzhou_host(hostname):
+            return None
+
+        path = parsed.path
+        # Match /episode/{24-char-hex-id}
+        match = re.search(r"/episode/([a-f0-9]{24})", path)
+        if match:
+            return match.group(1)
+
+        return None
+
+    except Exception:
+        return None
+
+
+def is_xiaoyuzhou_url(text: str) -> bool:
+    """
+    Check if a text contains a Xiaoyuzhou (小宇宙) podcast URL.
+
+    Supported formats:
+    - https://www.xiaoyuzhoufm.com/episode/xxxxxxxxxxxxxxxxxxxxxxxx
+
+    Args:
+        text: The text to check
+
+    Returns:
+        True if the text contains a Xiaoyuzhou URL
+    """
+    return extract_xiaoyuzhou_episode_id(text) is not None
+
+
 def is_supported_url(text: str) -> bool:
     """
-    Check if a text contains a supported URL (YouTube, Bilibili, or Apple Podcasts).
+    Check if a text contains a supported URL (YouTube, Bilibili, Apple Podcasts, or Xiaoyuzhou).
 
     Args:
         text: The text to check
@@ -315,7 +389,12 @@ def is_supported_url(text: str) -> bool:
     Returns:
         True if the text contains a supported URL
     """
-    return is_youtube_url(text) or is_bilibili_url(text) or is_apple_podcasts_url(text)
+    return (
+        is_youtube_url(text)
+        or is_bilibili_url(text)
+        or is_apple_podcasts_url(text)
+        or is_xiaoyuzhou_url(text)
+    )
 
 
 def get_url_platform(text: str) -> str | None:
@@ -326,7 +405,8 @@ def get_url_platform(text: str) -> str | None:
         text: The URL text
 
     Returns:
-        Platform name ("youtube", "bilibili", or "apple_podcasts") or None if not supported
+        Platform name ("youtube", "bilibili", "apple_podcasts", or "xiaoyuzhou")
+        or None if not supported
     """
     if is_youtube_url(text):
         return "youtube"
@@ -334,4 +414,6 @@ def get_url_platform(text: str) -> str | None:
         return "bilibili"
     if is_apple_podcasts_url(text):
         return "apple_podcasts"
+    if is_xiaoyuzhou_url(text):
+        return "xiaoyuzhou"
     return None

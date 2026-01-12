@@ -13,12 +13,13 @@ from aiogram.types import Message, FSInputFile, CallbackQuery, InlineKeyboardBut
 from aiogram.filters import Command
 
 from ..config import config
-from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_supported_url, get_url_platform, extract_video_id
+from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_xiaoyuzhou_url, is_supported_url, get_url_platform, extract_video_id, extract_xiaoyuzhou_episode_id
 from ..utils import settings_store
-from ..services.downloader import download_audio, DownloadResult, VideoMetadata
+from ..services.downloader import download_audio, download_audio_from_url, DownloadResult, VideoMetadata
 from ..services.transcriber import transcribe, TranscriptionMetadata
 from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata, VideoEditorMetadata
 from ..services.rss_parser import get_episode_metadata
+from ..services.xiaoyuzhou_parser import get_episode_metadata as get_xiaoyuzhou_metadata
 from ..services.pdf_generator import generate_pdf
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,6 @@ AUDIO_MIME_TYPES = [
     "audio/aac",
 ]
 
-# Allowed characters for sanitized filenames (alphanumeric, hyphen, underscore, dot, CJK)
-SAFE_FILENAME_PATTERN = re.compile(r"[^\w\u4e00-\u9fff\-.]", re.UNICODE)
-
 # Pattern to extract h1 title from markdown
 H1_TITLE_PATTERN = re.compile(r"^#\s+(.+?)$", re.MULTILINE)
 
@@ -71,11 +69,11 @@ def extract_title_from_transcript(transcript: str) -> str | None:
 
 def sanitize_filename(filename: str, max_length: int = 50) -> str:
     """
-    Sanitize a filename to prevent path traversal and other attacks.
+    Sanitize a filename by removing illegal characters.
 
     - Extracts basename to remove any path components
-    - Replaces unsafe characters with underscores
-    - Collapses consecutive underscores into one
+    - Removes illegal filesystem characters
+    - Collapses multiple spaces into one
     - Limits length to prevent filesystem issues
     """
     # Extract just the filename, removing any path components
@@ -84,19 +82,17 @@ def sanitize_filename(filename: str, max_length: int = 50) -> str:
     # Split into name and extension
     name, ext = os.path.splitext(filename)
 
-    # Replace unsafe characters
-    name = SAFE_FILENAME_PATTERN.sub("_", name)
-    ext = SAFE_FILENAME_PATTERN.sub("_", ext)
+    # Remove illegal characters (keep spaces, Chinese chars, alphanumeric, hyphen, dot)
+    illegal_chars = r'[\\:*?"<>|\x00-\x1f]'
+    name = re.sub(illegal_chars, '', name)
+    ext = re.sub(illegal_chars, '', ext)
 
-    # Collapse consecutive underscores into one
-    name = re.sub(r"_+", "_", name)
+    # Collapse multiple spaces into one
+    name = re.sub(r'\s+', ' ', name).strip()
 
-    # Strip leading/trailing underscores
-    name = name.strip("_")
-
-    # Limit length (ensure we don't end with underscore after truncation)
+    # Limit length
     if len(name) > max_length:
-        name = name[:max_length].rstrip("_")
+        name = name[:max_length].strip()
 
     # Ensure we have a valid name
     if not name:
@@ -157,6 +153,7 @@ async def cmd_start(message: Message):
         "- YouTube videos\n"
         "- Bilibili videos\n"
         "- Apple Podcasts\n"
+        "- Xiaoyuzhou Podcasts (小宇宙)\n"
         "- Audio files\n\n"
         "Just send me a URL or audio file!\n\n"
         "I'll generate a formatted transcript with summary and key points, "
@@ -172,7 +169,8 @@ async def cmd_help(message: Message):
         "*Supported URLs:*\n"
         "• YouTube: `youtube.com/watch?v=...`\n"
         "• Bilibili: `bilibili.com/video/BV...`\n"
-        "• Apple Podcasts: `podcasts.apple.com/...`\n\n"
+        "• Apple Podcasts: `podcasts.apple.com/...`\n"
+        "• Xiaoyuzhou: `xiaoyuzhoufm.com/episode/...`\n\n"
         "*Audio Files:*\n"
         "Send me an audio file (mp3, m4a, wav, webm, etc.)\n\n"
         "*Settings:*\n"
@@ -460,10 +458,23 @@ async def handle_text(message: Message):
             logger.error(f"Error processing Apple Podcasts URL: {e}", exc_info=True)
             await status_message.edit_text(f"Error processing podcast: {str(e)}")
 
+    elif platform == "xiaoyuzhou":
+        logger.info(f"Received Xiaoyuzhou URL: {text}")
+        status_message = await message.answer(
+            "Detected Xiaoyuzhou podcast. Processing...",
+            parse_mode="Markdown",
+        )
+
+        try:
+            await _process_video_url(message, text, status_message, platform)
+        except Exception as e:
+            logger.error(f"Error processing Xiaoyuzhou URL: {e}", exc_info=True)
+            await status_message.edit_text(f"Error processing podcast: {str(e)}")
+
     else:
         # Not a supported URL, ignore or send help
         await message.answer(
-            "Please send me a URL (YouTube/Bilibili/Apple Podcasts) or an audio file.\n"
+            "Please send me a URL (YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou) or an audio file.\n"
             "Use /help for more information."
         )
 
@@ -493,12 +504,12 @@ async def _process_video_url(
 
     # Create a unique temporary directory for this request to prevent collisions
     request_id = uuid.uuid4().hex[:12]
-    platform_prefixes = {"youtube": "yt", "bilibili": "bili", "apple_podcasts": "pod"}
+    platform_prefixes = {"youtube": "yt", "bilibili": "bili", "apple_podcasts": "pod", "xiaoyuzhou": "xyz"}
     platform_prefix = platform_prefixes.get(platform, "media")
     request_temp_dir = os.path.join(config.temp_dir, f"{platform_prefix}_{request_id}")
     os.makedirs(request_temp_dir, exist_ok=True)
 
-    platform_names = {"youtube": "YouTube", "bilibili": "Bilibili", "apple_podcasts": "Apple Podcasts"}
+    platform_names = {"youtube": "YouTube", "bilibili": "Bilibili", "apple_podcasts": "Apple Podcasts", "xiaoyuzhou": "Xiaoyuzhou"}
     platform_name = platform_names.get(platform, "source")
 
     try:
@@ -507,6 +518,21 @@ async def _process_video_url(
         # ============================================
         if platform == "apple_podcasts":
             await _process_apple_podcast(
+                message=message,
+                url=url,
+                status_message=status_message,
+                transcriber_config=transcriber_config,
+                editor_config=editor_config,
+                request_temp_dir=request_temp_dir,
+                chat_id=chat_id,
+            )
+            return
+
+        # ============================================
+        # Xiaoyuzhou: Use specialized podcast mode (via RSSHub)
+        # ============================================
+        if platform == "xiaoyuzhou":
+            await _process_xiaoyuzhou_podcast(
                 message=message,
                 url=url,
                 status_message=status_message,
@@ -592,7 +618,7 @@ async def _process_video_url(
 
         # Add date stamp
         date_stamp = datetime.now().strftime("%Y%m%d")
-        output_filename = f"{safe_title}_{date_stamp}"
+        output_filename = f"{safe_title} - {date_stamp}"
 
         # Save Markdown
         md_path = os.path.join(request_temp_dir, "transcript.md")
@@ -709,7 +735,7 @@ async def _process_apple_podcast(
     # Use podcast title for filename
     if editor_metadata:
         safe_title = sanitize_filename(
-            f"{editor_metadata.podcast_name}_{editor_metadata.episode_title}",
+            f"{editor_metadata.podcast_name} - {editor_metadata.episode_title}",
             max_length=200
         )
     else:
@@ -717,9 +743,137 @@ async def _process_apple_podcast(
 
     # Add date stamp
     date_stamp = datetime.now().strftime("%Y%m%d")
-    output_filename = f"{safe_title}_{date_stamp}"
+    output_filename = f"{safe_title} - {date_stamp}"
 
     # Save Markdown (use the structured markdown from podcast result)
+    md_path = os.path.join(request_temp_dir, "transcript.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(edited_result.markdown)
+
+    # Generate PDF
+    pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
+    await generate_pdf(edited_result.markdown, pdf_path)
+
+    # Upload to rclone if enabled for this user
+    rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
+
+    # Send files
+    await status_message.edit_text("Sending files...")
+
+    pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+
+    # Only send .md if rclone upload was not successful
+    if not rclone_uploaded:
+        md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
+        await message.answer_document(md_file, caption="Markdown transcript")
+
+    await message.answer_document(pdf_file, caption="PDF transcript")
+
+    # Show completion message (unified with other sources)
+    if rclone_uploaded:
+        await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
+    else:
+        await status_message.edit_text("Done! Your transcript is ready.")
+
+
+async def _process_xiaoyuzhou_podcast(
+    message: Message,
+    url: str,
+    status_message: Message,
+    transcriber_config,
+    editor_config,
+    request_temp_dir: str,
+    chat_id: int,
+) -> None:
+    """
+    Process a Xiaoyuzhou podcast URL using specialized podcast mode via RSSHub.
+
+    This uses:
+    - RSSHub to fetch podcast RSS and extract episode metadata/audio URL
+    - Episode metadata for context (podcast name, title, shownotes)
+    - Podcast-specific transcription prompt
+    - Podcast-specific editor with structured output (Info, Summary, Takeaways, Q&A, Highlights)
+    """
+    # Step 1: Extract episode ID from URL
+    episode_id = extract_xiaoyuzhou_episode_id(url)
+    if not episode_id:
+        raise ValueError("Could not extract episode ID from URL")
+
+    # Step 2: Get episode metadata via RSSHub
+    await status_message.edit_text("Fetching podcast metadata from RSSHub...")
+    episode_metadata = await get_xiaoyuzhou_metadata(episode_id)
+
+    if not episode_metadata:
+        raise ValueError(
+            "Could not fetch episode metadata. "
+            "Please ensure RSSHUB_BASE_URL is configured correctly."
+        )
+
+    if not episode_metadata.audio_url:
+        raise ValueError("No audio URL found in episode metadata")
+
+    logger.info(
+        f"Got xiaoyuzhou metadata: {episode_metadata.podcast_name} - "
+        f"{episode_metadata.episode_title}"
+    )
+
+    # Step 3: Download audio from direct URL
+    await status_message.edit_text("Downloading podcast audio...")
+    download_result = await download_audio_from_url(
+        audio_url=episode_metadata.audio_url,
+        output_dir=request_temp_dir,
+        filename_prefix=f"xyz_{episode_id[:8]}",
+    )
+    audio_path = download_result.audio_path
+
+    # Step 4: Transcribe with metadata context
+    await status_message.edit_text("Transcribing podcast...")
+
+    transcription_metadata = TranscriptionMetadata(
+        source_name=episode_metadata.podcast_name,
+        title=episode_metadata.episode_title,
+        publish_date=episode_metadata.publish_date,
+        description=episode_metadata.shownotes,
+    )
+
+    raw_transcript = await transcribe(
+        audio_path,
+        transcriber_config,
+        metadata=transcription_metadata,
+        on_status=lambda s: logger.info(s),
+    )
+
+    # Step 5: Edit with podcast mode (structured output)
+    await status_message.edit_text("Formatting transcript (podcast mode)...")
+
+    editor_metadata = PodcastEpisodeMetadata(
+        podcast_name=episode_metadata.podcast_name,
+        episode_title=episode_metadata.episode_title,
+        episode_link=episode_metadata.episode_link,
+        publish_date=episode_metadata.publish_date,
+        shownotes=episode_metadata.shownotes,
+    )
+
+    edited_result = await edit_podcast(
+        raw_transcript,
+        editor_config,
+        metadata=editor_metadata,
+        on_status=lambda s: logger.info(s),
+    )
+
+    # Step 6: Generate output files
+    await status_message.edit_text("Generating output files...")
+
+    safe_title = sanitize_filename(
+        f"{editor_metadata.podcast_name} - {editor_metadata.episode_title}",
+        max_length=200
+    )
+
+    # Add date stamp
+    date_stamp = datetime.now().strftime("%Y%m%d")
+    output_filename = f"{safe_title} - {date_stamp}"
+
+    # Save Markdown
     md_path = os.path.join(request_temp_dir, "transcript.md")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(edited_result.markdown)
@@ -853,7 +1007,7 @@ async def _process_audio_file(
 
         # Add date stamp
         date_stamp = datetime.now().strftime("%Y%m%d")
-        output_filename = f"{safe_title}_{date_stamp}"
+        output_filename = f"{safe_title} - {date_stamp}"
 
         # Save Markdown
         md_path = os.path.join(request_temp_dir, "transcript.md")

@@ -13,6 +13,8 @@ from ..utils.url_parser import (
     is_bilibili_url,
     extract_apple_podcasts_id,
     is_apple_podcasts_url,
+    extract_xiaoyuzhou_episode_id,
+    is_xiaoyuzhou_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,8 @@ async def download_audio(
         video_id = extract_bilibili_video_id(url)
     elif is_apple_podcasts_url(url):
         video_id = extract_apple_podcasts_id(url)
+    elif is_xiaoyuzhou_url(url):
+        video_id = extract_xiaoyuzhou_episode_id(url)
     else:
         video_id = extract_video_id(url)
 
@@ -230,3 +234,97 @@ def _get_info_with_ytdlp(url: str, ydl_opts: dict) -> dict | None:
     """Get video info using yt-dlp (synchronous function for thread pool)."""
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
+
+
+async def download_audio_from_url(
+    audio_url: str,
+    output_dir: str | None = None,
+    filename_prefix: str = "audio",
+    on_status: Callable[[str], None] | None = None,
+) -> DownloadResult:
+    """
+    Download audio from a direct audio URL (e.g., from podcast RSS feeds).
+
+    This function is used for downloading audio from direct URLs obtained
+    from RSS feeds (like Xiaoyuzhou via RSSHub) rather than video platform URLs.
+
+    Args:
+        audio_url: Direct URL to the audio file
+        output_dir: Directory to save the audio file (uses temp dir if not specified)
+        filename_prefix: Prefix for the output filename
+        on_status: Optional callback to report status updates
+
+    Returns:
+        DownloadResult containing path to the downloaded audio file
+
+    Raises:
+        DownloadError: If download fails
+    """
+    import uuid
+
+    logger.info(f"Downloading audio from direct URL: {audio_url[:100]}...")
+    if on_status:
+        on_status("Downloading podcast audio...")
+
+    # Use temp directory if not specified
+    if output_dir is None:
+        output_dir = tempfile.gettempdir()
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate unique filename
+    file_id = uuid.uuid4().hex[:12]
+    output_template = os.path.join(output_dir, f"{filename_prefix}_{file_id}.%(ext)s")
+
+    # yt-dlp options for direct audio download
+    # Note: No postprocessor needed - keep original format since transcriber supports multiple formats
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+    }
+
+    # Run yt-dlp in a thread pool to avoid blocking
+    loop = asyncio.get_event_loop()
+    try:
+        output_path = await loop.run_in_executor(
+            None,
+            lambda: _download_direct_url(
+                audio_url, ydl_opts, filename_prefix, file_id, output_dir
+            ),
+        )
+    except Exception as e:
+        raise DownloadError(f"Failed to download audio: {e}") from e
+
+    if not os.path.exists(output_path):
+        raise DownloadError(f"Downloaded file not found: {output_path}")
+
+    logger.info(f"Audio downloaded: {output_path}")
+    return DownloadResult(audio_path=output_path, metadata=None)
+
+
+def _download_direct_url(
+    url: str, ydl_opts: dict, prefix: str, file_id: str, output_dir: str
+) -> str:
+    """Download from direct URL using yt-dlp (sync, for thread pool)."""
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    # Try to get the actual downloaded filename from yt-dlp info
+    if info and "requested_downloads" in info and info["requested_downloads"]:
+        filepath = info["requested_downloads"][0].get("filepath")
+        if filepath and os.path.exists(filepath):
+            return filepath
+
+    # Fallback: search for files with common audio extensions
+    audio_extensions = ["mp3", "m4a", "webm", "opus", "wav", "ogg", "aac"]
+    for ext in audio_extensions:
+        candidate = os.path.join(output_dir, f"{prefix}_{file_id}.{ext}")
+        if os.path.exists(candidate):
+            return candidate
+
+    # If still not found, raise error
+    raise DownloadError(f"Downloaded file not found in {output_dir}")

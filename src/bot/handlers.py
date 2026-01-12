@@ -743,22 +743,11 @@ async def _process_apple_podcast(
 
     await message.answer_document(pdf_file, caption="PDF transcript")
 
-    # Show summary in status message
-    summary_preview = edited_result.summary[:200] + "..." if len(edited_result.summary) > 200 else edited_result.summary
-    stats = f"Takeaways: {len(edited_result.takeaways)} | Q&A: {len(edited_result.qa_pairs)} | Highlights: {len(edited_result.highlights)}"
-
+    # Show completion message (unified with other sources)
     if rclone_uploaded:
-        await status_message.edit_text(
-            f"Done! Your podcast transcript is ready. (Markdown synced to Dropbox)\n\n"
-            f"*{stats}*",
-            parse_mode="Markdown",
-        )
+        await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
     else:
-        await status_message.edit_text(
-            f"Done! Your podcast transcript is ready.\n\n"
-            f"*{stats}*",
-            parse_mode="Markdown",
-        )
+        await status_message.edit_text("Done! Your transcript is ready.")
 
 
 async def _process_audio_file(

@@ -25,7 +25,7 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 
 ```bash
 git clone <repo-url>
-cd omni_transcriber
+cd omni-transcriber
 
 # Create virtual environment
 python3 -m venv .venv

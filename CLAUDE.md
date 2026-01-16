@@ -51,4 +51,12 @@ All config via environment variables (see `.env.example`). Key settings:
 
 ### Local Bot API Server (Optional)
 
-For handling audio files larger than 20MB (Telegram's default limit), deploy a Local Bot API Server using `docker-compose.yml`. Requires `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org/auth.
+For handling audio files larger than 20MB (Telegram's default limit), deploy a Local Bot API Server using `docker-compose.yml`. Requires:
+- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org/auth
+- `TELEGRAM_API_SERVER` - Local Bot API server URL (e.g., `http://localhost:8081`)
+- `TELEGRAM_LOCAL_FILES_PATH` - Host path matching the Docker volume mount (e.g., `/path/to/data/telegram-bot-api`)
+
+**File Permission Handling**: The Docker container runs as `messagebus` user and creates files with `640` permissions. To allow the bot to read these files:
+1. Add bot user to `messagebus` group: `sudo usermod -a -G messagebus $USER`
+2. Use `run_bot.sh` wrapper script with `sg messagebus` to run bot with group permissions
+3. Start with pm2: `pm2 start run_bot.sh --name omni-transcriber`

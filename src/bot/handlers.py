@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import uuid
 from dataclasses import replace
@@ -956,8 +957,45 @@ async def _process_audio_file(
         ext = os.path.splitext(safe_filename)[1] or ".mp3"
         audio_path = os.path.join(request_temp_dir, f"input{ext}")
 
-        # Download file
-        await message.bot.download(file, destination=audio_path)
+        # Download file with permission fix for Local Bot API Server
+        try:
+            await message.bot.download(file, destination=audio_path)
+        except PermissionError as e:
+            # When using Local Bot API Server, files may have restricted permissions
+            # Try to fix permissions and copy manually
+            logger.warning(f"Permission error during download, attempting fix: {e}")
+
+            # Get file info to find the local path
+            file_info = await message.bot.get_file(file.file_id)
+            if file_info.file_path:
+                # Convert container path to host path if using local mode
+                local_files_path = config.telegram.local_files_path
+                if local_files_path and file_info.file_path.startswith("/var/lib/telegram-bot-api"):
+                    host_path = file_info.file_path.replace(
+                        "/var/lib/telegram-bot-api",
+                        local_files_path,
+                        1
+                    )
+                    logger.info(f"Attempting to fix permissions for: {host_path}")
+
+                    # Try to make file readable (requires sudo or appropriate permissions)
+                    try:
+                        os.chmod(host_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+                    except PermissionError:
+                        # If direct chmod fails, try with sudo
+                        subprocess.run(
+                            ["sudo", "-n", "chmod", "644", host_path],
+                            check=True,
+                            capture_output=True
+                        )
+
+                    # Copy the file instead of using aiogram download
+                    shutil.copy2(host_path, audio_path)
+                    logger.info(f"Successfully copied file after permission fix")
+                else:
+                    raise  # Re-raise if not local mode
+            else:
+                raise  # Re-raise if no file_path
 
         # Create metadata from caption if provided
         transcription_metadata = None

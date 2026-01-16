@@ -34,6 +34,7 @@ class TelegramConfig:
     bot_token: str
     allowed_chat_ids: list[int] = field(default_factory=list)
     api_server: str = ""  # Local Bot API server URL, e.g., "http://localhost:8081"
+    local_files_path: str = ""  # Host path for Local Bot API files, e.g., "./data/telegram-bot-api"
 
 
 @dataclass
@@ -182,6 +183,7 @@ def load_config() -> AppConfig:
         bot_token=bot_token,
         allowed_chat_ids=allowed_chat_ids,
         api_server=api_server,
+        local_files_path=os.getenv("TELEGRAM_LOCAL_FILES_PATH", ""),
     )
 
     # Validate thinking levels

@@ -87,6 +87,7 @@ Edit `.env` with your credentials:
 | `RSSHUB_BASE_URL` | *(empty)* | RSSHub instance URL (required for Xiaoyuzhou) |
 | `RSSHUB_KEY` | *(empty)* | RSSHub access key (optional) |
 | `TELEGRAM_API_SERVER` | *(empty)* | Local Bot API server URL (for files > 20MB) |
+| `TELEGRAM_LOCAL_FILES_PATH` | *(empty)* | Host path for Local Bot API files |
 
 ### 4. Run the Bot
 
@@ -141,12 +142,33 @@ By default, Telegram Bot API limits file downloads to 20MB. To handle larger aud
 TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_API_SERVER=http://localhost:8081
+TELEGRAM_LOCAL_FILES_PATH=/absolute/path/to/data/telegram-bot-api
 
 # Start the server
 docker compose up -d
 ```
 
-### 3. First-time Setup
+### 3. File Permission Setup
+
+The Docker container runs as `messagebus` user and creates files with restricted permissions. To allow the bot to read downloaded files:
+
+```bash
+# Add your user to messagebus group
+sudo usermod -a -G messagebus $USER
+
+# Log out and back in, or use newgrp
+newgrp messagebus
+```
+
+Use the wrapper script `run_bot.sh` to run the bot with proper group permissions:
+
+```bash
+# Start with pm2
+pm2 start run_bot.sh --name omni-transcriber
+pm2 save
+```
+
+### 4. First-time Setup
 
 If the bot was previously running with official Telegram API, log out first:
 

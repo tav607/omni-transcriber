@@ -4,6 +4,7 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
@@ -29,13 +30,20 @@ def create_bot() -> Bot:
     if not config.telegram.bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not configured")
 
-    # Check for proxy
     proxy_url = get_proxy_url()
     session = None
 
-    if proxy_url:
-        logger.info(f"Using proxy: {proxy_url}")
-        session = AiohttpSession(proxy=proxy_url)
+    api_server = config.telegram.api_server
+
+    if api_server or proxy_url:
+        session = AiohttpSession(
+            api=TelegramAPIServer.from_base(api_server) if api_server else None,
+            proxy=proxy_url,
+        )
+        if api_server:
+            logger.info(f"Using local Bot API server: {api_server}")
+        if proxy_url:
+            logger.info(f"Using proxy: {proxy_url}")
 
     return Bot(
         token=config.telegram.bot_token,

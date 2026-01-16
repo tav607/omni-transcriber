@@ -47,3 +47,8 @@ All config via environment variables (see `.env.example`). Key settings:
 - `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - "low" or "high"
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
 - `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support
+- `TELEGRAM_API_SERVER` - Local Bot API server URL (optional, for files > 20MB)
+
+### Local Bot API Server (Optional)
+
+For handling audio files larger than 20MB (Telegram's default limit), deploy a Local Bot API Server using `docker-compose.yml`. Requires `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from https://my.telegram.org/auth.

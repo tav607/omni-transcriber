@@ -6,6 +6,7 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 
 - Transcribe audio from YouTube, Bilibili, Apple Podcasts, and Xiaoyuzhou (小宇宙)
 - Transcribe uploaded audio files (mp3, m4a, wav, webm, ogg, flac)
+- Support large audio files up to 2GB via Local Bot API Server
 - Generate formatted transcripts with summary and key points
 - Output as both Markdown and PDF files
 - Chinese summary with original language transcript preservation
@@ -85,6 +86,7 @@ Edit `.env` with your credentials:
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `RSSHUB_BASE_URL` | *(empty)* | RSSHub instance URL (required for Xiaoyuzhou) |
 | `RSSHUB_KEY` | *(empty)* | RSSHub access key (optional) |
+| `TELEGRAM_API_SERVER` | *(empty)* | Local Bot API server URL (for files > 20MB) |
 
 ### 4. Run the Bot
 
@@ -120,6 +122,38 @@ The bot will reply with:
 - `/help` - Usage instructions
 - `/model` - Choose AI model (Flash/Pro) for transcriber and editor
 - `/translation` - Toggle inline Chinese translation
+
+## Local Bot API Server (Optional)
+
+By default, Telegram Bot API limits file downloads to 20MB. To handle larger audio files (up to 2GB), deploy a Local Bot API Server:
+
+### 1. Get Telegram API Credentials
+
+1. Go to https://my.telegram.org/auth
+2. Log in with your phone number
+3. Select "API development tools"
+4. Create an app to get `api_id` and `api_hash`
+
+### 2. Configure and Run
+
+```bash
+# Add to .env
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_API_SERVER=http://localhost:8081
+
+# Start the server
+docker compose up -d
+```
+
+### 3. First-time Setup
+
+If the bot was previously running with official Telegram API, log out first:
+
+```bash
+curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/logOut"
+# Wait ~10 minutes before starting the bot
+```
 
 ## Proxy Support
 

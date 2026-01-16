@@ -2,6 +2,7 @@ import os
 import logging
 from dataclasses import dataclass, field
 from typing import Literal
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -32,6 +33,7 @@ class EditorConfig:
 class TelegramConfig:
     bot_token: str
     allowed_chat_ids: list[int] = field(default_factory=list)
+    api_server: str = ""  # Local Bot API server URL, e.g., "http://localhost:8081"
 
 
 @dataclass
@@ -166,9 +168,20 @@ def load_config() -> AppConfig:
                 except ValueError:
                     logging.warning(f"Invalid chat ID: {id_str}")
 
+    # Validate API server URL if provided
+    api_server = os.getenv("TELEGRAM_API_SERVER", "")
+    if api_server:
+        parsed = urlparse(api_server)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError(
+                f"Invalid TELEGRAM_API_SERVER URL: '{api_server}'. "
+                "Must be a valid URL like 'http://localhost:8081'."
+            )
+
     telegram = TelegramConfig(
         bot_token=bot_token,
         allowed_chat_ids=allowed_chat_ids,
+        api_server=api_server,
     )
 
     # Validate thinking levels

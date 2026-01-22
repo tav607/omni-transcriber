@@ -121,7 +121,9 @@ async def upload_to_rclone(file_path: str, filename: str, chat_id: int) -> bool:
     if chat_id not in config.rclone.enabled_chat_ids:
         return False
 
-    destination = f"{config.rclone.upload_path}/{filename}"
+    # Construct full rclone path: remote:path/filename
+    upload_path = config.rclone.upload_path.rstrip("/")
+    destination = f"{config.rclone.remote}:{upload_path}/{filename}"
     logger.info(f"Uploading to rclone: {destination}")
 
     try:

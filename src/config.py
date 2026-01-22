@@ -39,12 +39,13 @@ class TelegramConfig:
 
 @dataclass
 class RcloneConfig:
-    upload_path: str = ""  # e.g., "dropbox:/Obsidian/Transcripts"
+    remote: str = ""  # rclone remote name, e.g., "dropbox"
+    upload_path: str = ""  # Upload path without remote prefix, e.g., "/Obsidian/Transcripts"
     enabled_chat_ids: list[int] = field(default_factory=list)
 
     @property
     def is_enabled(self) -> bool:
-        return bool(self.upload_path)
+        return bool(self.remote and self.upload_path)
 
 
 @dataclass
@@ -60,12 +61,31 @@ class RSSHubConfig:
 
 
 @dataclass
+class DropboxWatcherConfig:
+    """Configuration for Dropbox folder watcher."""
+
+    access_token: str = ""  # Dropbox OAuth access token
+    watch_folder: str = ""  # Dropbox folder to watch, e.g., "/Recordings"
+    processed_subfolder: str = "_processed"  # Subfolder for processed files
+    output_folder: str = ""  # Dropbox folder for output, e.g., "/Transcripts"
+    telegram_chat_id: int = 0  # Telegram chat ID for notifications
+    poll_interval: int = 30  # Longpoll timeout retry interval in seconds
+    rclone_remote: str = "dropbox"  # rclone remote name for Dropbox
+    max_file_size_mb: int = 500  # Maximum file size in MB (0 = no limit)
+
+    @property
+    def is_enabled(self) -> bool:
+        return bool(self.access_token and self.watch_folder)
+
+
+@dataclass
 class AppConfig:
     telegram: TelegramConfig
     transcriber: TranscriberConfig
     editor: EditorConfig
     rclone: RcloneConfig = field(default_factory=RcloneConfig)
     rsshub: RSSHubConfig = field(default_factory=RSSHubConfig)
+    dropbox_watcher: DropboxWatcherConfig = field(default_factory=DropboxWatcherConfig)
     temp_dir: str = "/tmp/omni_transcriber"
     log_level: str = "INFO"
 
@@ -223,6 +243,7 @@ def load_config() -> AppConfig:
                     logging.warning(f"Invalid rclone chat ID: {id_str}")
 
     rclone = RcloneConfig(
+        remote=os.getenv("RCLONE_REMOTE", ""),
         upload_path=os.getenv("RCLONE_UPLOAD_PATH", ""),
         enabled_chat_ids=rclone_enabled_chat_ids,
     )
@@ -233,12 +254,59 @@ def load_config() -> AppConfig:
         key=os.getenv("RSSHUB_KEY", ""),
     )
 
+    # Load Dropbox watcher config
+    dropbox_chat_id_str = os.getenv("DROPBOX_TELEGRAM_CHAT_ID", "")
+    dropbox_chat_id = 0
+    if dropbox_chat_id_str:
+        try:
+            dropbox_chat_id = int(dropbox_chat_id_str)
+        except ValueError:
+            logging.warning(f"Invalid DROPBOX_TELEGRAM_CHAT_ID: {dropbox_chat_id_str}")
+
+    dropbox_poll_interval = 30
+    dropbox_poll_interval_str = os.getenv("DROPBOX_POLL_INTERVAL", "")
+    if dropbox_poll_interval_str:
+        try:
+            dropbox_poll_interval = int(dropbox_poll_interval_str)
+            # Validate range: must be 1-480 seconds (Dropbox longpoll API limit)
+            if dropbox_poll_interval < 1:
+                logging.warning(f"DROPBOX_POLL_INTERVAL {dropbox_poll_interval} too low, using minimum 1")
+                dropbox_poll_interval = 1
+            elif dropbox_poll_interval > 480:
+                logging.warning(f"DROPBOX_POLL_INTERVAL {dropbox_poll_interval} exceeds Dropbox API limit, using maximum 480")
+                dropbox_poll_interval = 480
+        except ValueError:
+            logging.warning(f"Invalid DROPBOX_POLL_INTERVAL: {dropbox_poll_interval_str}, using default 30")
+
+    dropbox_max_file_size = 500
+    dropbox_max_file_size_str = os.getenv("DROPBOX_MAX_FILE_SIZE_MB", "")
+    if dropbox_max_file_size_str:
+        try:
+            dropbox_max_file_size = int(dropbox_max_file_size_str)
+            if dropbox_max_file_size < 0:
+                logging.warning(f"DROPBOX_MAX_FILE_SIZE_MB {dropbox_max_file_size} invalid, using default 500")
+                dropbox_max_file_size = 500
+        except ValueError:
+            logging.warning(f"Invalid DROPBOX_MAX_FILE_SIZE_MB: {dropbox_max_file_size_str}, using default 500")
+
+    dropbox_watcher = DropboxWatcherConfig(
+        access_token=os.getenv("DROPBOX_ACCESS_TOKEN", ""),
+        watch_folder=os.getenv("DROPBOX_WATCH_FOLDER", ""),
+        processed_subfolder=os.getenv("DROPBOX_PROCESSED_SUBFOLDER", "_processed"),
+        output_folder=os.getenv("DROPBOX_OUTPUT_FOLDER", ""),
+        telegram_chat_id=dropbox_chat_id,
+        poll_interval=dropbox_poll_interval,
+        rclone_remote=os.getenv("DROPBOX_RCLONE_REMOTE", "dropbox"),
+        max_file_size_mb=dropbox_max_file_size,
+    )
+
     return AppConfig(
         telegram=telegram,
         transcriber=transcriber,
         editor=editor,
         rclone=rclone,
         rsshub=rsshub,
+        dropbox_watcher=dropbox_watcher,
         temp_dir=os.getenv("TEMP_DIR", "/tmp/omni_transcriber"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

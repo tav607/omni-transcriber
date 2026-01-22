@@ -15,4 +15,5 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "aiofiles>=24.0.0",
     "feedparser>=6.0.12",
+    "dropbox>=12.0.0",
 ]

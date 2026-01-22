@@ -5,6 +5,7 @@ import re
 
 import markdown
 from weasyprint import HTML, CSS, default_url_fetcher
+from weasyprint.text.fonts import FontConfiguration
 
 logger = logging.getLogger(__name__)
 
@@ -107,63 +108,80 @@ def _sanitize_html(html_content: str) -> str:
 DEFAULT_CSS = """
 @page {
     size: A4;
-    margin: 2cm;
+    margin: 2cm 2.5cm;
+
+    @bottom-center {
+        content: "- " counter(page) " -";
+        font-family: "Sarasa Gothic SC", "Noto Sans CJK SC", "PingFang SC",
+                     "Microsoft YaHei", sans-serif;
+        font-size: 9pt;
+        color: #808080;
+    }
 }
 
 body {
     font-family: "Sarasa Gothic SC", "Noto Sans CJK SC", "PingFang SC",
                  "Microsoft YaHei", sans-serif;
-    font-size: 12pt;
+    font-size: 11pt;
     line-height: 1.6;
     color: #333;
+    text-align: left;
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 h1 {
-    font-size: 24pt;
+    font-size: 20pt;
     color: #1a1a1a;
-    border-bottom: 2px solid #333;
+    border-bottom: 1px solid #c8c8c8;
     padding-bottom: 0.3em;
-    margin-top: 1em;
+    margin-top: 0;
+    margin-bottom: 0.3em;
 }
 
 h2 {
-    font-size: 18pt;
-    color: #2a2a2a;
-    border-bottom: 1px solid #ccc;
-    padding-bottom: 0.2em;
-    margin-top: 1.5em;
+    font-size: 14pt;
+    color: #2c3e50;
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
 }
 
 h3 {
-    font-size: 14pt;
-    color: #3a3a3a;
+    font-size: 12pt;
+    color: #34495e;
     margin-top: 1em;
+    margin-bottom: 0.4em;
 }
 
 p {
-    margin: 0.8em 0;
+    margin: 0.5em 0;
     text-align: left;
 }
 
 ul, ol {
     margin: 0.5em 0;
-    padding-left: 1.5em;
+    padding-left: 2em;
 }
 
 li {
     margin: 0.3em 0;
 }
 
+a {
+    color: #0066cc;
+    text-decoration: none;
+}
+
 hr {
     border: none;
-    border-top: 1px solid #ddd;
-    margin: 1.5em 0;
+    border-top: 1px solid #c8c8c8;
+    margin: 1em 0;
 }
 
 code {
     font-family: "Fira Code", "Source Code Pro", "Consolas", monospace;
     background-color: #f5f5f5;
-    padding: 0.2em 0.4em;
+    padding: 0.1em 0.3em;
     border-radius: 3px;
     font-size: 0.9em;
 }
@@ -181,6 +199,14 @@ blockquote {
     margin: 1em 0;
     padding-left: 1em;
     color: #666;
+}
+
+strong {
+    font-weight: bold;
+}
+
+em {
+    font-style: italic;
 }
 """
 
@@ -242,7 +268,10 @@ async def generate_pdf(markdown_content: str, output_path: str) -> str:
 
 def _generate_pdf_sync(html_content: str, output_path: str) -> None:
     """Generate PDF synchronously (for thread pool execution)."""
+    # Configure fonts
+    font_config = FontConfiguration()
+
     # Use custom url_fetcher to block all external resources (SSRF prevention)
     html = HTML(string=html_content, url_fetcher=_safe_url_fetcher)
-    css = CSS(string=DEFAULT_CSS)
-    html.write_pdf(output_path, stylesheets=[css])
+    css = CSS(string=DEFAULT_CSS, font_config=font_config)
+    html.write_pdf(output_path, stylesheets=[css], font_config=font_config)

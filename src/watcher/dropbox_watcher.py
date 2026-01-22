@@ -41,7 +41,11 @@ class DropboxWatcher:
         """
         self.config = watcher_config
         self.bot = bot
-        self.dbx = dropbox.Dropbox(watcher_config.access_token)
+        self.dbx = dropbox.Dropbox(
+            app_key=watcher_config.app_key,
+            app_secret=watcher_config.app_secret,
+            oauth2_refresh_token=watcher_config.refresh_token,
+        )
         self.cursor: str | None = None
         self.processing_files: Set[str] = set()  # Track files being processed
 
@@ -252,7 +256,7 @@ class DropboxWatcher:
 
             except dropbox.exceptions.AuthError as e:
                 logger.error(f"Dropbox auth error: {e}")
-                logger.error("Please check your DROPBOX_ACCESS_TOKEN")
+                logger.error("Please check your DROPBOX_APP_KEY, DROPBOX_APP_SECRET, and DROPBOX_REFRESH_TOKEN")
                 # Don't retry auth errors, exit the loop
                 raise
 

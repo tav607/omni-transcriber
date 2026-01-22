@@ -64,7 +64,9 @@ class RSSHubConfig:
 class DropboxWatcherConfig:
     """Configuration for Dropbox folder watcher."""
 
-    access_token: str = ""  # Dropbox OAuth access token
+    app_key: str = ""  # Dropbox App key
+    app_secret: str = ""  # Dropbox App secret
+    refresh_token: str = ""  # Dropbox OAuth refresh token (long-lived)
     watch_folder: str = ""  # Dropbox folder to watch, e.g., "/Recordings"
     processed_subfolder: str = "_processed"  # Subfolder for processed files
     output_folder: str = ""  # Dropbox folder for output, e.g., "/Transcripts"
@@ -75,7 +77,7 @@ class DropboxWatcherConfig:
 
     @property
     def is_enabled(self) -> bool:
-        return bool(self.access_token and self.watch_folder)
+        return bool(self.app_key and self.app_secret and self.refresh_token and self.watch_folder)
 
 
 @dataclass
@@ -290,7 +292,9 @@ def load_config() -> AppConfig:
             logging.warning(f"Invalid DROPBOX_MAX_FILE_SIZE_MB: {dropbox_max_file_size_str}, using default 500")
 
     dropbox_watcher = DropboxWatcherConfig(
-        access_token=os.getenv("DROPBOX_ACCESS_TOKEN", ""),
+        app_key=os.getenv("DROPBOX_APP_KEY", ""),
+        app_secret=os.getenv("DROPBOX_APP_SECRET", ""),
+        refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN", ""),
         watch_folder=os.getenv("DROPBOX_WATCH_FOLDER", ""),
         processed_subfolder=os.getenv("DROPBOX_PROCESSED_SUBFOLDER", "_processed"),
         output_folder=os.getenv("DROPBOX_OUTPUT_FOLDER", ""),

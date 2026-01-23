@@ -240,7 +240,9 @@ async def process_audio_file(
 
     # Status message for progress updates
     status_message = None
-    escaped_path = html.escape(dropbox_path)
+    # Remove leading "/" to avoid Telegram treating it as a command
+    display_path = dropbox_path.lstrip("/")
+    escaped_path = html.escape(display_path)
 
     async def update_status(text: str):
         """Update the status message with new text."""

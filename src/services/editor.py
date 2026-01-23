@@ -54,6 +54,280 @@ def _has_meaningful_content(chunk: str) -> bool:
 
 USER_PROMPT_PREFIX = "Here's the transcript:\n\n"
 
+# Default sections for metadata generation (used when no CONTEXT.md override)
+DEFAULT_SECTIONS = """Output a JSON object with these fields:
+- "title": string - 简短的中文标题，概括内容主题 (5-15个中文字符，仅中文、数字和基本标点)
+- "summary": string - 中文摘要，概括核心内容和关键结论 (不超过300字)
+- "key_points": array of strings - 中文要点列表，关注可执行事项、决策和重要信息 (最多20条)"""
+
+# System prompt template for metadata generation (JSON output)
+METADATA_SYSTEM_PROMPT_TEMPLATE = """You are a professional transcript analyst. Given an edited transcript, generate structured metadata in JSON format.
+
+## Required Output
+
+{sections}
+
+## Language Rules
+- Unless specified otherwise in the field instructions, output title/summary/key_points in Chinese (简体中文)
+
+## Rules
+- Output ONLY a valid JSON object
+- Do NOT wrap in markdown code blocks or any other formatting
+- Ensure all strings are properly escaped
+- Arrays should contain strings only
+"""
+
+# Section heading mappings (field name → display heading)
+SECTION_HEADINGS = {
+    "summary": "Summary",
+    "key_points": "Key Points",
+    "decisions": "Decisions",
+    "action_items": "Action Items",
+    "key_concepts": "Key Concepts",
+    "questions": "Questions",
+    "highlights": "Highlights",
+    "homework": "Homework",
+}
+
+# Translation prompt for translating transcript text
+TRANSLATION_SYSTEM_PROMPT = """You are a professional translator. Add inline Chinese translations to the following transcript.
+
+## Rules
+- First determine if the text is primarily in Chinese. If yes, return it UNCHANGED.
+- For non-Chinese text: after each paragraph, add a blockquote with the Chinese translation
+- Format:
+  Original paragraph text.
+  > 中文翻译。
+
+  Next paragraph.
+  > 下一段翻译。
+
+- Translate meaning accurately, not word-for-word
+- Keep proper nouns, technical terms, brand names unchanged
+- Output ONLY the processed text, no explanations or commentary
+"""
+
+
+async def _generate_normal_metadata(
+    client: genai.Client,
+    transcript: str,
+    sections: str,
+    model: str,
+    temperature: float,
+    thinking_budget: int,
+    metadata: Optional["VideoEditorMetadata"] = None,
+    background: str = "",
+) -> dict:
+    """Generate metadata JSON from edited transcript.
+
+    Args:
+        client: Gemini API client
+        transcript: The edited transcript text
+        sections: Section definitions (from CONTEXT.md or DEFAULT_SECTIONS)
+        model: Model to use
+        temperature: Temperature setting
+        thinking_budget: Thinking budget
+        metadata: Optional video metadata for additional context
+        background: Optional background context from CONTEXT.md
+
+    Returns:
+        Dictionary with metadata fields (title, summary, key_points, etc.)
+    """
+    logger.info("Generating metadata from edited transcript...")
+
+    # Build user content with context
+    parts = []
+
+    if metadata:
+        parts.append("## Source Information")
+        parts.append(f"- Channel/Source: {metadata.channel}")
+        parts.append(f"- Title: {metadata.title}")
+        if metadata.upload_date:
+            parts.append(f"- Date: {metadata.upload_date}")
+        if metadata.description:
+            desc_truncated = metadata.description[:1500]
+            if len(metadata.description) > 1500:
+                desc_truncated += "..."
+            parts.append(f"- Description: {desc_truncated}")
+        parts.append("")
+    elif background:
+        parts.append("## Background Information")
+        parts.append(background)
+        parts.append("")
+
+    parts.append("## Transcript")
+    parts.append("")
+
+    # Truncate very long transcripts for metadata generation
+    max_transcript_chars = 500000
+    if len(transcript) > max_transcript_chars:
+        logger.warning(f"Transcript too long ({len(transcript)} chars), truncating for metadata generation")
+        transcript_truncated = transcript[:max_transcript_chars] + "\n\n[... transcript truncated ...]"
+        parts.append(transcript_truncated)
+    else:
+        parts.append(transcript)
+
+    user_content = "\n".join(parts)
+
+    # Build system prompt with sections
+    system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections)
+
+    def _generate():
+        return client.models.generate_content(
+            model=model,
+            contents=user_content,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=temperature,
+                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                max_output_tokens=8192,
+            ),
+        )
+
+    response = await asyncio.to_thread(_generate)
+
+    if not response.text:
+        raise ValueError("Empty metadata response")
+
+    # Parse JSON from response
+    response_text = response.text.strip()
+
+    # Strategy 1: Try parsing entire response directly (ideal case - LLM followed instructions)
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Extract from ```json ... ``` code block
+    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Extract from ``` ... ``` code block
+    json_match = re.search(r'```\s*([\{\[].*?[\}\]])\s*```', response_text, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 4: Find first '{' and try parsing progressively longer substrings
+    # This handles cases where LLM adds explanation after JSON
+    first_brace = response_text.find('{')
+    if first_brace != -1:
+        # Try parsing from first '{' to each subsequent '}'
+        brace_count = 0
+        for i, char in enumerate(response_text[first_brace:], start=first_brace):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    # Found matching closing brace
+                    candidate = response_text[first_brace:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue  # Try next closing brace
+
+    raise ValueError(f"No valid JSON found in metadata output: {response_text[:500]}")
+
+
+def _build_normal_result(
+    metadata_dict: dict,
+    edited_transcript: str,
+) -> str:
+    """Build final Markdown from metadata dict and edited transcript.
+
+    Args:
+        metadata_dict: Dictionary with title, summary, key_points, etc.
+        edited_transcript: The edited transcript text
+
+    Returns:
+        Final Markdown string
+    """
+    parts = []
+
+    # Extract title (special handling - becomes h1)
+    title = metadata_dict.get("title", "Transcript")
+    parts.append(f"# {title}")
+    parts.append("")
+
+    # Process remaining fields in order
+    for key, value in metadata_dict.items():
+        # Skip title (already handled) and internal/private fields
+        if key == "title" or key.startswith("_"):
+            continue
+
+        # Get display heading
+        heading = SECTION_HEADINGS.get(key, key.replace("_", " ").title())
+        parts.append(f"## {heading}")
+        parts.append("")
+
+        if isinstance(value, list):
+            for item in value:
+                parts.append(f"- {item}")
+        elif isinstance(value, dict):
+            # Handle nested dicts as key: value pairs
+            for k, v in value.items():
+                parts.append(f"- **{k}**: {v}")
+        else:
+            parts.append(str(value))
+
+        parts.append("")
+
+    # Add transcript section
+    parts.append("## Transcript")
+    parts.append("")
+    parts.append(edited_transcript)
+
+    return "\n".join(parts)
+
+
+async def _translate_transcript(
+    client: genai.Client,
+    transcript: str,
+    model: str,
+    temperature: float,
+    thinking_budget: int,
+) -> str:
+    """Add inline Chinese translations to non-Chinese transcript.
+
+    Args:
+        client: Gemini API client
+        transcript: The transcript text to translate
+        model: Model to use
+        temperature: Temperature setting
+        thinking_budget: Thinking budget
+
+    Returns:
+        Transcript with inline translations (or unchanged if already Chinese)
+    """
+    logger.info("Adding inline translations to transcript...")
+
+    def _generate():
+        return client.models.generate_content(
+            model=model,
+            contents=transcript,
+            config=types.GenerateContentConfig(
+                system_instruction=TRANSLATION_SYSTEM_PROMPT,
+                temperature=temperature,
+                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                max_output_tokens=65536,
+            ),
+        )
+
+    response = await asyncio.to_thread(_generate)
+
+    if not response.text:
+        logger.warning("Empty translation response, returning original transcript")
+        return transcript
+
+    return response.text.strip()
+
 # Raw transcript editing prompt - corrects errors and removes fillers
 RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task is to clean up this raw transcript chunk.
 
@@ -247,23 +521,27 @@ def _split_into_chunks(transcript: str, chunk_size: int = CHUNK_SIZE) -> List[st
 async def edit(
     transcript: str,
     config: EditorConfig,
-    system_prompt_override: str | None = None,
+    sections_override: str | None = None,
     enable_translation: bool = False,
     metadata: Optional[VideoEditorMetadata] = None,
+    background: str = "",
     on_status: Callable[[str], None] | None = None,
 ) -> str:
     """
-    Edit and format a transcript using Gemini API with two-step processing.
+    Edit and format a transcript using Gemini API with multi-step processing.
 
     Step 1: Edit raw transcript in chunks (parallel) - fix errors, remove fillers
-    Step 2: Generate final output with Title/Summary/Key Points from edited transcript
+    Step 2: Generate metadata JSON (title, summary, key_points) from edited transcript
+    Step 2b (optional): Add inline translations if enabled
+    Step 3: Assemble final Markdown from metadata + edited transcript
 
     Args:
         transcript: The raw transcript text to edit
         config: Editor configuration
-        system_prompt_override: Optional override for the system prompt
+        sections_override: Optional override for section definitions (from CONTEXT.md)
         enable_translation: If True, add inline Chinese translations for non-Chinese transcripts
         metadata: Optional video metadata for context (helps with speaker names, proper nouns)
+        background: Optional background context from CONTEXT.md (for Dropbox watcher mode)
         on_status: Optional callback to report status updates
 
     Returns:
@@ -308,6 +586,7 @@ async def edit(
                     index,
                     len(chunks),
                     metadata,
+                    background,
                 ),
                 max_attempts=3,
                 base_delay_ms=1000,
@@ -335,6 +614,7 @@ async def edit(
                 0,
                 1,
                 metadata,
+                background,
             ),
             max_attempts=3,
             base_delay_ms=1000,
@@ -344,36 +624,62 @@ async def edit(
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
     # ============================================
-    # Step 2: Generate final output with metadata
+    # Step 2: Generate metadata JSON
     # ============================================
     if on_status:
         on_status("Generating summary and key points...")
 
-    # Use override or default system prompt for final formatting
-    system_prompt = system_prompt_override or config.system_prompt
+    # Use section definitions from override or default
+    sections = sections_override or DEFAULT_SECTIONS
 
-    # Add translation instructions if enabled
-    if enable_translation:
-        system_prompt = system_prompt + TRANSLATION_PROMPT_ADDITION
-        logger.info("Translation mode enabled")
-
-    # Prepare user content with edited transcript
-    user_content = USER_PROMPT_PREFIX + edited_transcript
-
-    # Generate final formatted output
-    final_output = await with_retry(
-        lambda: _generate_final_output(
+    # Generate metadata (title, summary, key_points, etc.)
+    metadata_dict = await with_retry(
+        lambda: _generate_normal_metadata(
             client,
-            user_content,
-            system_prompt,
+            edited_transcript,
+            sections,
             config.model,
             config.temperature,
             thinking_budget,
+            metadata,
+            background,
         ),
         max_attempts=3,
         base_delay_ms=1000,
-        context="Generating final output",
+        context="Generating metadata",
     )
+
+    logger.info(f"Generated metadata: title='{metadata_dict.get('title', 'N/A')}', "
+                f"{len(metadata_dict.get('key_points', []))} key points")
+
+    # ============================================
+    # Step 2b (optional): Add inline translations
+    # ============================================
+    final_transcript = edited_transcript
+
+    if enable_translation:
+        if on_status:
+            on_status("Adding inline translations...")
+        logger.info("Translation mode enabled, adding inline translations")
+
+        final_transcript = await with_retry(
+            lambda: _translate_transcript(
+                client,
+                edited_transcript,
+                config.model,
+                config.temperature,
+                thinking_budget,
+            ),
+            max_attempts=3,
+            base_delay_ms=1000,
+            context="Adding translations",
+        )
+        logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
+
+    # ============================================
+    # Step 3: Assemble final Markdown
+    # ============================================
+    final_output = _build_normal_result(metadata_dict, final_transcript)
 
     logger.info(f"Editing completed, output length: {len(final_output)}")
 
@@ -392,11 +698,12 @@ async def _edit_raw_chunk(
     chunk_index: int,
     total_chunks: int,
     metadata: Optional[VideoEditorMetadata] = None,
+    background: str = "",
 ) -> str:
     """Edit a raw transcript chunk (fix errors, remove fillers)."""
     logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks}...")
 
-    # Build user content with optional metadata context
+    # Build user content with optional context (metadata or background)
     parts = []
     if metadata:
         parts.append("## Video Information (用于推断正确的说话人名字和专有名词)")
@@ -407,6 +714,10 @@ async def _edit_raw_chunk(
         if metadata.description:
             parts.append(f"- Description: {metadata.description}")
         parts.append("")
+    elif background:
+        parts.append("## Background Information (用于推断正确的说话人名字和专有名词)")
+        parts.append(background)
+        parts.append("")
 
     parts.append(f"## Raw Transcript Chunk ({chunk_index + 1}/{total_chunks})")
     parts.append("")
@@ -414,8 +725,8 @@ async def _edit_raw_chunk(
 
     user_content = "\n".join(parts)
 
-    # Use context-aware prompt if metadata provided
-    system_prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if metadata else RAW_EDIT_SYSTEM_PROMPT
+    # Use context-aware prompt if metadata or background provided
+    system_prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if (metadata or background) else RAW_EDIT_SYSTEM_PROMPT
 
     def _generate():
         return client.models.generate_content(

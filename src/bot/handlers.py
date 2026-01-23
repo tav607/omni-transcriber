@@ -399,7 +399,7 @@ async def handle_audio(message: Message):
         return
 
     logger.info(f"Received audio file: {file_name}")
-    status_message = await message.answer("Received audio file. Processing...")
+    status_message = await message.answer("📁 Received audio file. Processing...")
 
     # Get caption for metadata context
     caption = message.caption
@@ -425,7 +425,7 @@ async def handle_text(message: Message):
         video_id = extract_video_id(text)
         logger.info(f"Received YouTube URL, video_id: {video_id}")
         status_message = await message.answer(
-            f"Detected YouTube video. Processing...\nVideo ID: `{video_id}`",
+            f"🔗 Detected YouTube video. Processing...\nVideo ID: `{video_id}`",
             parse_mode="Markdown",
         )
 
@@ -438,7 +438,7 @@ async def handle_text(message: Message):
     elif platform == "bilibili":
         logger.info(f"Received Bilibili URL: {text}")
         status_message = await message.answer(
-            "Detected Bilibili video. Processing...",
+            "🔗 Detected Bilibili video. Processing...",
             parse_mode="Markdown",
         )
 
@@ -451,7 +451,7 @@ async def handle_text(message: Message):
     elif platform == "apple_podcasts":
         logger.info(f"Received Apple Podcasts URL: {text}")
         status_message = await message.answer(
-            "Detected Apple Podcasts. Processing...",
+            "🎧 Detected Apple Podcasts. Processing...",
             parse_mode="Markdown",
         )
 
@@ -464,7 +464,7 @@ async def handle_text(message: Message):
     elif platform == "xiaoyuzhou":
         logger.info(f"Received Xiaoyuzhou URL: {text}")
         status_message = await message.answer(
-            "Detected Xiaoyuzhou podcast. Processing...",
+            "🎧 Detected Xiaoyuzhou podcast. Processing...",
             parse_mode="Markdown",
         )
 
@@ -551,7 +551,7 @@ async def _process_video_url(
         # ============================================
 
         # Download audio
-        await status_message.edit_text(f"Downloading audio from {platform_name}...")
+        await status_message.edit_text(f"⏬ Downloading audio from {platform_name}...")
         download_result = await download_audio(url, request_temp_dir)
         audio_path = download_result.audio_path
         video_metadata = download_result.metadata
@@ -570,7 +570,7 @@ async def _process_video_url(
             )
 
         # Transcribe
-        await status_message.edit_text("Transcribing audio...")
+        await status_message.edit_text("🎙 Transcribing audio...")
         raw_transcript = await transcribe(
             audio_path,
             transcriber_config,
@@ -590,7 +590,7 @@ async def _process_video_url(
             )
 
         # Edit/format
-        await status_message.edit_text("Formatting transcript...")
+        await status_message.edit_text("✏️ Formatting transcript...")
         edited_transcript = await edit(
             raw_transcript,
             editor_config,
@@ -600,7 +600,7 @@ async def _process_video_url(
         )
 
         # Generate output files
-        await status_message.edit_text("Generating output files...")
+        await status_message.edit_text("📄 Generating output files...")
 
         # Use video title from metadata for filename, fallback to extracted title
         title = None
@@ -636,7 +636,7 @@ async def _process_video_url(
         rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
 
         # Send files
-        await status_message.edit_text("Sending files...")
+        await status_message.edit_text("📤 Sending files...")
 
         pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
 
@@ -648,9 +648,9 @@ async def _process_video_url(
         await message.answer_document(pdf_file, caption="PDF transcript")
 
         if rclone_uploaded:
-            await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
+            await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")
         else:
-            await status_message.edit_text("Done! Your transcript is ready.")
+            await status_message.edit_text("✅ Done! Your transcript is ready.")
 
     finally:
         # Cleanup entire temp directory for this request
@@ -678,7 +678,7 @@ async def _process_apple_podcast(
     - Podcast-specific editor with structured output (Info, Summary, Takeaways, Q&A, Highlights)
     """
     # Step 1: Get episode metadata from RSS feed
-    await status_message.edit_text("Fetching podcast metadata...")
+    await status_message.edit_text("🔍 Fetching podcast metadata...")
     episode_metadata = await get_episode_metadata(url)
 
     if episode_metadata:
@@ -687,12 +687,12 @@ async def _process_apple_podcast(
         logger.warning("Could not get podcast metadata, proceeding without context")
 
     # Step 2: Download audio
-    await status_message.edit_text("Downloading podcast audio...")
+    await status_message.edit_text("⏬ Downloading podcast audio...")
     download_result = await download_audio(url, request_temp_dir)
     audio_path = download_result.audio_path
 
     # Step 3: Transcribe with metadata context
-    await status_message.edit_text("Transcribing podcast...")
+    await status_message.edit_text("🎙 Transcribing podcast...")
 
     # Convert to TranscriptionMetadata for transcriber
     transcription_metadata = None
@@ -712,7 +712,7 @@ async def _process_apple_podcast(
     )
 
     # Step 4: Edit with podcast mode (structured output)
-    await status_message.edit_text("Formatting transcript (podcast mode)...")
+    await status_message.edit_text("✏️ Formatting transcript (podcast mode)...")
 
     # Convert to PodcastEpisodeMetadata for editor
     editor_metadata = None
@@ -733,7 +733,7 @@ async def _process_apple_podcast(
     )
 
     # Step 5: Generate output files
-    await status_message.edit_text("Generating output files...")
+    await status_message.edit_text("📄 Generating output files...")
 
     # Use podcast title for filename
     if editor_metadata:
@@ -761,7 +761,7 @@ async def _process_apple_podcast(
     rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
 
     # Send files
-    await status_message.edit_text("Sending files...")
+    await status_message.edit_text("📤 Sending files...")
 
     pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
 
@@ -774,9 +774,9 @@ async def _process_apple_podcast(
 
     # Show completion message (unified with other sources)
     if rclone_uploaded:
-        await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
+        await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")
     else:
-        await status_message.edit_text("Done! Your transcript is ready.")
+        await status_message.edit_text("✅ Done! Your transcript is ready.")
 
 
 async def _process_xiaoyuzhou_podcast(
@@ -803,7 +803,7 @@ async def _process_xiaoyuzhou_podcast(
         raise ValueError("Could not extract episode ID from URL")
 
     # Step 2: Get episode metadata via RSSHub
-    await status_message.edit_text("Fetching podcast metadata from RSSHub...")
+    await status_message.edit_text("🔍 Fetching podcast metadata from RSSHub...")
     episode_metadata = await get_xiaoyuzhou_metadata(episode_id)
 
     if not episode_metadata:
@@ -821,7 +821,7 @@ async def _process_xiaoyuzhou_podcast(
     )
 
     # Step 3: Download audio from direct URL
-    await status_message.edit_text("Downloading podcast audio...")
+    await status_message.edit_text("⏬ Downloading podcast audio...")
     download_result = await download_audio_from_url(
         audio_url=episode_metadata.audio_url,
         output_dir=request_temp_dir,
@@ -830,7 +830,7 @@ async def _process_xiaoyuzhou_podcast(
     audio_path = download_result.audio_path
 
     # Step 4: Transcribe with metadata context
-    await status_message.edit_text("Transcribing podcast...")
+    await status_message.edit_text("🎙 Transcribing podcast...")
 
     transcription_metadata = TranscriptionMetadata(
         source_name=episode_metadata.podcast_name,
@@ -847,7 +847,7 @@ async def _process_xiaoyuzhou_podcast(
     )
 
     # Step 5: Edit with podcast mode (structured output)
-    await status_message.edit_text("Formatting transcript (podcast mode)...")
+    await status_message.edit_text("✏️ Formatting transcript (podcast mode)...")
 
     editor_metadata = PodcastEpisodeMetadata(
         podcast_name=episode_metadata.podcast_name,
@@ -865,7 +865,7 @@ async def _process_xiaoyuzhou_podcast(
     )
 
     # Step 6: Generate output files
-    await status_message.edit_text("Generating output files...")
+    await status_message.edit_text("📄 Generating output files...")
 
     safe_title = sanitize_filename(
         f"{editor_metadata.podcast_name} - {editor_metadata.episode_title}",
@@ -889,7 +889,7 @@ async def _process_xiaoyuzhou_podcast(
     rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
 
     # Send files
-    await status_message.edit_text("Sending files...")
+    await status_message.edit_text("📤 Sending files...")
 
     pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
 
@@ -902,9 +902,9 @@ async def _process_xiaoyuzhou_podcast(
 
     # Show completion message (unified with other sources)
     if rclone_uploaded:
-        await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
+        await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")
     else:
-        await status_message.edit_text("Done! Your transcript is ready.")
+        await status_message.edit_text("✅ Done! Your transcript is ready.")
 
 
 async def _process_audio_file(
@@ -953,7 +953,7 @@ async def _process_audio_file(
 
     try:
         # Download file from Telegram
-        await status_message.edit_text("Downloading audio file...")
+        await status_message.edit_text("⏬ Downloading audio file...")
 
         # Get file extension (sanitized)
         ext = os.path.splitext(safe_filename)[1] or ".mp3"
@@ -1015,7 +1015,7 @@ async def _process_audio_file(
             )
 
         # Transcribe
-        await status_message.edit_text("Transcribing audio...")
+        await status_message.edit_text("🎙 Transcribing audio...")
         raw_transcript = await transcribe(
             audio_path,
             transcriber_config,
@@ -1024,7 +1024,7 @@ async def _process_audio_file(
         )
 
         # Edit/format
-        await status_message.edit_text("Formatting transcript...")
+        await status_message.edit_text("✏️ Formatting transcript...")
         edited_transcript = await edit(
             raw_transcript,
             editor_config,
@@ -1034,7 +1034,7 @@ async def _process_audio_file(
         )
 
         # Generate output files
-        await status_message.edit_text("Generating output files...")
+        await status_message.edit_text("📄 Generating output files...")
 
         # Extract title from transcript for filename
         title = extract_title_from_transcript(edited_transcript)
@@ -1062,7 +1062,7 @@ async def _process_audio_file(
         rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
 
         # Send files
-        await status_message.edit_text("Sending files...")
+        await status_message.edit_text("📤 Sending files...")
 
         pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
 
@@ -1074,9 +1074,9 @@ async def _process_audio_file(
         await message.answer_document(pdf_file, caption="PDF transcript")
 
         if rclone_uploaded:
-            await status_message.edit_text("Done! Your transcript is ready. (Markdown synced to Dropbox)")
+            await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")
         else:
-            await status_message.edit_text("Done! Your transcript is ready.")
+            await status_message.edit_text("✅ Done! Your transcript is ready.")
 
     finally:
         # Cleanup entire temp directory for this request

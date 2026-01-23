@@ -42,7 +42,7 @@ class ContextConfig:
     """Configuration loaded from CONTEXT.md file."""
 
     background: str = ""  # Background information about the recordings
-    editor_prompt: str = ""  # Custom editor system prompt override
+    sections: str = ""  # Custom section definitions for JSON output format
     extra_fields: dict = field(default_factory=dict)  # Any additional fields
 
 
@@ -81,8 +81,9 @@ def parse_context_md(content: str) -> ContextConfig:
     ## Background
     Some background info about the recordings in this folder.
 
-    ## Editor Prompt
-    Custom system prompt for the editor...
+    ## Sections
+    Custom section definitions for JSON output format.
+    Defines what fields the LLM should output (title, summary, key_points, etc.)
     ```
 
     Args:
@@ -113,8 +114,8 @@ def parse_context_md(content: str) -> ContextConfig:
 
         if header == "background":
             config.background = body
-        elif header in ("editor prompt", "editor_prompt", "editorprompt"):
-            config.editor_prompt = body
+        elif header in ("sections", "output format", "output_format"):
+            config.sections = body
         else:
             # Store any other sections in extra_fields
             config.extra_fields[header] = body

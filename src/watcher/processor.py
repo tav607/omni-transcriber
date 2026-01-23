@@ -353,19 +353,11 @@ async def process_audio_file(
             await update_status(f"📤 Uploading to Dropbox...\n<code>{escaped_path}</code>")
             output_folder = watcher_config.output_folder.rstrip("/")
 
-            # Upload markdown
+            # Upload markdown only (PDF is sent via Telegram)
             md_dst = f"{rclone_remote}:{output_folder}/{output_filename}.md"
-            md_uploaded = await rclone_copyto(md_path, md_dst)
-            if not md_uploaded:
+            upload_succeeded = await rclone_copyto(md_path, md_dst)
+            if not upload_succeeded:
                 logger.error(f"Failed to upload markdown to: {md_dst}")
-
-            # Upload PDF
-            pdf_dst = f"{rclone_remote}:{output_folder}/{output_filename}.pdf"
-            pdf_uploaded = await rclone_copyto(pdf_path, pdf_dst)
-            if not pdf_uploaded:
-                logger.error(f"Failed to upload PDF to: {pdf_dst}")
-
-            upload_succeeded = md_uploaded and pdf_uploaded
             if upload_succeeded:
                 logger.info(f"Uploaded results to: {output_folder}")
 

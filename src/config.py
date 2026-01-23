@@ -67,7 +67,7 @@ class DropboxWatcherConfig:
     app_key: str = ""  # Dropbox App key
     app_secret: str = ""  # Dropbox App secret
     refresh_token: str = ""  # Dropbox OAuth refresh token (long-lived)
-    watch_folder: str = ""  # Dropbox folder to watch, e.g., "/Recordings"
+    watch_folder: str | None = None  # Dropbox folder to watch ("" for App folder root, None = disabled)
     processed_subfolder: str = "_processed"  # Subfolder for processed files
     output_folder: str = ""  # Dropbox folder for output, e.g., "/Transcripts"
     telegram_chat_id: int = 0  # Telegram chat ID for notifications
@@ -77,7 +77,8 @@ class DropboxWatcherConfig:
 
     @property
     def is_enabled(self) -> bool:
-        return bool(self.app_key and self.app_secret and self.refresh_token and self.watch_folder)
+        # watch_folder can be "" (empty string) for App folder root, so use `is not None`
+        return bool(self.app_key and self.app_secret and self.refresh_token and self.watch_folder is not None)
 
 
 @dataclass
@@ -295,7 +296,7 @@ def load_config() -> AppConfig:
         app_key=os.getenv("DROPBOX_APP_KEY", ""),
         app_secret=os.getenv("DROPBOX_APP_SECRET", ""),
         refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN", ""),
-        watch_folder=os.getenv("DROPBOX_WATCH_FOLDER", ""),
+        watch_folder=os.getenv("DROPBOX_WATCH_FOLDER"),  # None if not set, "" for App folder root
         processed_subfolder=os.getenv("DROPBOX_PROCESSED_SUBFOLDER", "_processed"),
         output_folder=os.getenv("DROPBOX_OUTPUT_FOLDER", ""),
         telegram_chat_id=dropbox_chat_id,

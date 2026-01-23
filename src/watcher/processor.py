@@ -207,6 +207,13 @@ async def process_audio_file(
     """
     watcher_config = config.dropbox_watcher
     rclone_remote = watcher_config.rclone_remote
+    rclone_base_path = watcher_config.rclone_base_path.rstrip("/")
+
+    def to_rclone_path(sdk_path: str) -> str:
+        """Convert Dropbox SDK path to rclone full path."""
+        if rclone_base_path:
+            return f"{rclone_remote}:{rclone_base_path}{sdk_path}"
+        return f"{rclone_remote}:{sdk_path}"
 
     # Validate path for safety
     if not validate_dropbox_path(dropbox_path):
@@ -231,29 +238,42 @@ async def process_audio_file(
     request_id = uuid.uuid4().hex[:12]
     temp_dir = tempfile.mkdtemp(prefix=f"dropbox_{request_id}_")
 
-    try:
-        # Step 0: Send start notification
-        if watcher_config.telegram_chat_id:
-            try:
-                escaped_path = html.escape(dropbox_path)
-                file_size_str = ""
-                if file_size_bytes > 0:
-                    file_size_mb = file_size_bytes / (1024 * 1024)
-                    file_size_str = f" ({file_size_mb:.1f} MB)"
-                await bot.send_message(
+    # Status message for progress updates
+    status_message = None
+    escaped_path = html.escape(dropbox_path)
+
+    async def update_status(text: str):
+        """Update the status message with new text."""
+        nonlocal status_message
+        if not watcher_config.telegram_chat_id:
+            return
+        try:
+            if status_message:
+                await status_message.edit_text(text, parse_mode="HTML")
+            else:
+                status_message = await bot.send_message(
                     chat_id=watcher_config.telegram_chat_id,
-                    text=f"🎙 Processing new audio file{file_size_str}:\n<code>{escaped_path}</code>",
+                    text=text,
                     parse_mode="HTML",
                 )
-            except Exception as e:
-                logger.warning(f"Failed to send start notification: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to update status: {e}")
+
+    try:
+        # Step 0: Send start notification
+        file_size_str = ""
+        if file_size_bytes > 0:
+            file_size_mb = file_size_bytes / (1024 * 1024)
+            file_size_str = f" ({file_size_mb:.1f} MB)"
+        await update_status(f"🎙 Processing new audio file{file_size_str}:\n<code>{escaped_path}</code>")
 
         # Step 1: Download audio from Dropbox
+        await update_status(f"⏬ Downloading audio{file_size_str}...\n<code>{escaped_path}</code>")
         logger.info(f"Downloading audio: {dropbox_path}")
         local_audio_dir = os.path.join(temp_dir, "input")
         os.makedirs(local_audio_dir, exist_ok=True)
 
-        src_path = f"{rclone_remote}:{dropbox_path}"
+        src_path = to_rclone_path(dropbox_path)
         if not await rclone_copy(src_path, local_audio_dir):
             raise RuntimeError(f"Failed to download audio: {dropbox_path}")
 
@@ -264,6 +284,7 @@ async def process_audio_file(
         logger.info(f"Downloaded to: {local_audio_path}")
 
         # Step 2: Transcribe (with optional background context from CONTEXT.md)
+        await update_status(f"🎙 Transcribing audio...\n<code>{escaped_path}</code>")
         logger.info("Starting transcription...")
 
         # Create metadata from background if available
@@ -285,6 +306,7 @@ async def process_audio_file(
         logger.info(f"Transcription complete, length: {len(raw_transcript)}")
 
         # Step 3: Edit/format (with optional custom sections from CONTEXT.md)
+        await update_status(f"✏️ Formatting transcript...\n<code>{escaped_path}</code>")
         logger.info("Starting editing...")
         sections_override = context.sections if context.sections else None
         edited_transcript = await edit(
@@ -297,6 +319,7 @@ async def process_audio_file(
         logger.info(f"Editing complete, length: {len(edited_transcript)}")
 
         # Step 4: Generate output files
+        await update_status(f"📄 Generating output files...\n<code>{escaped_path}</code>")
         title = extract_title_from_transcript(edited_transcript)
         if title:
             safe_title = sanitize_filename(title, max_length=200)
@@ -327,6 +350,7 @@ async def process_audio_file(
 
         upload_succeeded = False  # Default to False, only set True when upload succeeds
         if watcher_config.output_folder:
+            await update_status(f"📤 Uploading to Dropbox...\n<code>{escaped_path}</code>")
             output_folder = watcher_config.output_folder.rstrip("/")
 
             # Upload markdown
@@ -349,15 +373,20 @@ async def process_audio_file(
         telegram_sent = False
         if watcher_config.telegram_chat_id:
             try:
+                await update_status(f"📤 Sending files...\n<code>{escaped_path}</code>")
                 pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
-                # Use HTML mode and escape path to avoid Markdown injection issues
-                escaped_path = html.escape(dropbox_path)
                 await bot.send_document(
                     chat_id=watcher_config.telegram_chat_id,
                     document=pdf_file,
-                    caption=f"✅ Transcription complete:\n<code>{escaped_path}</code>",
+                    caption=f"✅ Transcription complete:\n{escaped_path}",
                     parse_mode="HTML",
                 )
+                # Delete status message after sending the document
+                if status_message:
+                    try:
+                        await status_message.delete()
+                    except Exception:
+                        pass  # Ignore deletion errors
                 logger.info(f"Sent notification to chat: {watcher_config.telegram_chat_id}")
                 telegram_sent = True
             except Exception as e:
@@ -373,7 +402,7 @@ async def process_audio_file(
             processed_dir = f"{parent_dir}/{watcher_config.processed_subfolder}"
             processed_path = f"{processed_dir}/{filename}"
 
-            if await rclone_moveto(f"{rclone_remote}:{dropbox_path}", f"{rclone_remote}:{processed_path}"):
+            if await rclone_moveto(to_rclone_path(dropbox_path), to_rclone_path(processed_path)):
                 logger.info(f"Moved original to: {processed_path}")
             else:
                 logger.error(f"Failed to move original file to: {processed_path}")
@@ -384,19 +413,9 @@ async def process_audio_file(
     except Exception as e:
         logger.error(f"Failed to process {dropbox_path}: {e}", exc_info=True)
 
-        # Try to send error notification
-        if watcher_config.telegram_chat_id:
-            try:
-                # Use HTML format to avoid Markdown injection issues
-                escaped_path = html.escape(dropbox_path)
-                escaped_error = html.escape(str(e))
-                await bot.send_message(
-                    chat_id=watcher_config.telegram_chat_id,
-                    text=f"❌ Failed to process:\n<code>{escaped_path}</code>\n\nError: {escaped_error}",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
+        # Update status message with error
+        escaped_error = html.escape(str(e))
+        await update_status(f"❌ Failed to process:\n<code>{escaped_path}</code>\n\nError: {escaped_error}")
 
         return False
 

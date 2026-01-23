@@ -558,11 +558,14 @@ async def edit(
         http_options={"base_url": "https://generativelanguage.googleapis.com"},
     )
 
-    # Configure thinking based on level
-    thinking_budget = 1024 if config.thinking_level == "low" else 8192
+    # Configure thinking budgets for different steps
+    # Raw editing and translation use low thinking (simple cleanup tasks)
+    # Metadata generation uses high thinking (needs deep reasoning for summarization)
+    thinking_budget_low = 1024
+    thinking_budget_high = 8192
 
     # ============================================
-    # Step 1: Edit raw transcript in chunks (parallel)
+    # Step 1: Edit raw transcript in chunks (parallel) - uses LOW thinking
     # ============================================
     if on_status:
         on_status("Editing raw transcript...")
@@ -582,7 +585,7 @@ async def edit(
                     chunk,
                     config.model,
                     config.temperature,
-                    thinking_budget,
+                    thinking_budget_low,  # Raw editing uses low thinking
                     index,
                     len(chunks),
                     metadata,
@@ -610,7 +613,7 @@ async def edit(
                 chunks[0],
                 config.model,
                 config.temperature,
-                thinking_budget,
+                thinking_budget_low,  # Raw editing uses low thinking
                 0,
                 1,
                 metadata,
@@ -640,7 +643,7 @@ async def edit(
             sections,
             config.model,
             config.temperature,
-            thinking_budget,
+            thinking_budget_high,  # Metadata generation uses high thinking
             metadata,
             background,
         ),
@@ -668,7 +671,7 @@ async def edit(
                 edited_transcript,
                 config.model,
                 config.temperature,
-                thinking_budget,
+                thinking_budget_low,  # Translation uses low thinking
             ),
             max_attempts=3,
             base_delay_ms=1000,
@@ -959,11 +962,14 @@ async def edit_podcast(
         http_options={"base_url": "https://generativelanguage.googleapis.com"},
     )
 
-    # Configure thinking based on level
-    thinking_budget = 1024 if config.thinking_level == "low" else 8192
+    # Configure thinking budgets for different steps
+    # Raw editing uses low thinking (simple cleanup tasks)
+    # Metadata generation uses high thinking (needs deep reasoning for summarization)
+    thinking_budget_low = 1024
+    thinking_budget_high = 8192
 
     # ============================================
-    # Step 1: Edit raw transcript in chunks (parallel)
+    # Step 1: Edit raw transcript in chunks (parallel) - uses LOW thinking
     # ============================================
     if on_status:
         on_status("Editing raw transcript...")
@@ -986,7 +992,7 @@ async def edit_podcast(
                 metadata,
                 config.model,
                 config.temperature,
-                thinking_budget,
+                thinking_budget_low,  # Raw editing uses low thinking
                 index,
                 len(chunks),
             ),
@@ -1028,7 +1034,7 @@ async def edit_podcast(
             metadata,
             config.model,
             config.temperature,
-            thinking_budget,
+            thinking_budget_high,  # Metadata generation uses high thinking
         ),
         max_attempts=3,
         base_delay_ms=1000,

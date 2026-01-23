@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 logger = logging.getLogger(__name__)
 
 
-def _is_safe_dropbox_path(path: str) -> bool:
+def _is_safe_dropbox_path(path: str, allow_empty: bool = False) -> bool:
     """
     Check if a Dropbox path is safe (no path traversal).
 
@@ -22,12 +22,14 @@ def _is_safe_dropbox_path(path: str) -> bool:
 
     Args:
         path: Dropbox path to check
+        allow_empty: If True, allow empty string (for App folder root)
 
     Returns:
         True if path is safe, False otherwise.
     """
+    # Empty string is valid for App folder root if allowed
     if not path:
-        return False
+        return allow_empty
 
     # Check for path traversal attempts before normalization
     # Use PurePosixPath since Dropbox paths are always POSIX-style
@@ -147,16 +149,20 @@ async def load_context(
         logger.warning(f"Unsafe audio path rejected: {dropbox_audio_path!r}")
         return ContextConfig()
 
-    if not _is_safe_dropbox_path(watch_folder):
+    if not _is_safe_dropbox_path(watch_folder, allow_empty=True):
         logger.warning(f"Unsafe watch folder rejected: {watch_folder!r}")
         return ContextConfig()
 
     # Normalize paths after validation
     dropbox_audio_path = os.path.normpath(dropbox_audio_path)
-    watch_folder = os.path.normpath(watch_folder)
 
-    # Ensure watch_folder ends with separator for proper prefix matching
-    watch_folder_prefix = watch_folder.rstrip("/") + "/"
+    # Special handling for empty watch_folder (App folder root)
+    # Empty string means all paths are within watch scope
+    is_app_folder_root = (watch_folder == "")
+    if not is_app_folder_root:
+        watch_folder = os.path.normpath(watch_folder)
+        # Ensure watch_folder ends with separator for proper prefix matching
+        watch_folder_prefix = watch_folder.rstrip("/") + "/"
 
     # Start from the audio file's directory
     current_dir = os.path.dirname(dropbox_audio_path)
@@ -166,9 +172,11 @@ async def load_context(
         current_dir = os.path.normpath(current_dir)
 
         # Check if we've gone above the watch folder
-        # Use proper prefix check: current_dir must be watch_folder or start with watch_folder/
-        if current_dir != watch_folder.rstrip("/") and not current_dir.startswith(watch_folder_prefix):
-            break
+        # Skip this check for App folder root (all paths are valid)
+        if not is_app_folder_root:
+            # Use proper prefix check: current_dir must be watch_folder or start with watch_folder/
+            if current_dir != watch_folder.rstrip("/") and not current_dir.startswith(watch_folder_prefix):
+                break
 
         context_path = f"{current_dir}/CONTEXT.md"
         rclone_path = f"{rclone_remote}:{context_path}"

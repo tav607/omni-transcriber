@@ -187,8 +187,8 @@ class DropboxWatcher:
                 self.config.watch_folder,
                 self.config.rclone_remote,
             )
-            if context.editor_prompt:
-                logger.info("Using custom editor prompt from CONTEXT.md")
+            if context.sections:
+                logger.info("Using custom sections from CONTEXT.md")
 
             # Process the audio file
             from ..config import config as app_config

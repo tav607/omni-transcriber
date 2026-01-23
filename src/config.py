@@ -73,6 +73,7 @@ class DropboxWatcherConfig:
     telegram_chat_id: int = 0  # Telegram chat ID for notifications
     poll_interval: int = 30  # Longpoll timeout retry interval in seconds
     rclone_remote: str = "dropbox"  # rclone remote name for Dropbox
+    rclone_base_path: str = ""  # Base path for rclone (maps App folder to full Dropbox path)
     max_file_size_mb: int = 500  # Maximum file size in MB (0 = no limit)
 
     @property
@@ -302,6 +303,7 @@ def load_config() -> AppConfig:
         telegram_chat_id=dropbox_chat_id,
         poll_interval=dropbox_poll_interval,
         rclone_remote=os.getenv("DROPBOX_RCLONE_REMOTE", "dropbox"),
+        rclone_base_path=os.getenv("DROPBOX_RCLONE_BASE_PATH", ""),
         max_file_size_mb=dropbox_max_file_size,
     )
 

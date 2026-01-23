@@ -129,6 +129,7 @@ async def load_context(
     dropbox_audio_path: str,
     watch_folder: str,
     rclone_remote: str = "dropbox",
+    rclone_base_path: str = "",
 ) -> ContextConfig:
     """
     Load CONTEXT.md from the audio file's directory, searching up to watch folder.
@@ -140,6 +141,7 @@ async def load_context(
         dropbox_audio_path: Dropbox path to the audio file, e.g., "/Recordings/meetings/file.m4a"
         watch_folder: The root watch folder, e.g., "/Recordings"
         rclone_remote: rclone remote name (default: "dropbox")
+        rclone_base_path: Base path for rclone (maps App folder to full Dropbox path)
 
     Returns:
         ContextConfig parsed from CONTEXT.md, or empty config if not found.
@@ -164,6 +166,15 @@ async def load_context(
         # Ensure watch_folder ends with separator for proper prefix matching
         watch_folder_prefix = watch_folder.rstrip("/") + "/"
 
+    # Normalize rclone_base_path
+    rclone_base_path = rclone_base_path.rstrip("/")
+
+    def to_rclone_path(sdk_path: str) -> str:
+        """Convert Dropbox SDK path to rclone full path."""
+        if rclone_base_path:
+            return f"{rclone_remote}:{rclone_base_path}{sdk_path}"
+        return f"{rclone_remote}:{sdk_path}"
+
     # Start from the audio file's directory
     current_dir = os.path.dirname(dropbox_audio_path)
 
@@ -179,7 +190,7 @@ async def load_context(
                 break
 
         context_path = f"{current_dir}/CONTEXT.md"
-        rclone_path = f"{rclone_remote}:{context_path}"
+        rclone_path = to_rclone_path(context_path)
 
         logger.debug(f"Looking for CONTEXT.md at: {rclone_path}")
         content = await rclone_cat(rclone_path)

@@ -186,6 +186,7 @@ class DropboxWatcher:
                 path,
                 self.config.watch_folder,
                 self.config.rclone_remote,
+                self.config.rclone_base_path,
             )
             if context.sections:
                 logger.info("Using custom sections from CONTEXT.md")

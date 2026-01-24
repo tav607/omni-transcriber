@@ -93,6 +93,7 @@ async def download_audio(
 
     # yt-dlp options for audio extraction
     ydl_opts = {
+        # Fallback to m3u8 streams if HTTPS formats fail
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "postprocessors": [
@@ -105,6 +106,13 @@ async def download_audio(
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
+        # Retry options for transient failures
+        "retries": 10,
+        "fragment_retries": 10,
+        # Add headers to avoid bot detection
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        },
     }
 
     # Run yt-dlp in a thread pool to avoid blocking

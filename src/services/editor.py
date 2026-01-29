@@ -87,6 +87,7 @@ SECTION_HEADINGS = {
     "questions": "Questions",
     "highlights": "Highlights",
     "homework": "Homework",
+    "qa": "Q&A Highlights",
 }
 
 # Translation prompt for translating transcript text
@@ -269,7 +270,18 @@ def _build_normal_result(
 
         if isinstance(value, list):
             for item in value:
-                parts.append(f"- {item}")
+                if isinstance(item, dict):
+                    # Handle list of dicts: first key gets bullet, rest use <br> for PDF line break
+                    first = True
+                    for k, v in item.items():
+                        key_upper = k.upper()
+                        if first:
+                            parts.append(f"- **{key_upper}**: {v}")
+                            first = False
+                        else:
+                            parts.append(f"  <br>**{key_upper}**: {v}")
+                else:
+                    parts.append(f"- {item}")
         elif isinstance(value, dict):
             # Handle nested dicts as key: value pairs
             for k, v in value.items():

@@ -251,8 +251,9 @@ class DropboxWatcher:
 
                 logger.info(f"Detected {len(files_to_process)} new audio file(s)")
 
-                # Process files in parallel
-                await asyncio.gather(*[self._process_file(f) for f in files_to_process])
+                # Process files in background (don't block longpoll loop)
+                for f in files_to_process:
+                    asyncio.create_task(self._process_file(f))
 
             except dropbox.exceptions.AuthError as e:
                 logger.error(f"Dropbox auth error: {e}")

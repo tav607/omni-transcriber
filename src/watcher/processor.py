@@ -315,6 +315,7 @@ async def process_audio_file(
             raw_transcript,
             config.editor,
             sections_override=sections_override,
+            enable_translation=context.enable_translation,
             background=context.background,
             on_status=lambda s: logger.info(f"Edit: {s}"),
         )

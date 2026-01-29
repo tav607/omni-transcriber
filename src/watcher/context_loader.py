@@ -45,6 +45,7 @@ class ContextConfig:
 
     background: str = ""  # Background information about the recordings
     sections: str = ""  # Custom section definitions for JSON output format
+    enable_translation: bool = False  # Whether to add inline translations
     extra_fields: dict = field(default_factory=dict)  # Any additional fields
 
 
@@ -118,6 +119,9 @@ def parse_context_md(content: str) -> ContextConfig:
             config.background = body
         elif header in ("sections", "output format", "output_format"):
             config.sections = body
+        elif header == "translation":
+            # Enable translation if section exists (content doesn't matter)
+            config.enable_translation = True
         else:
             # Store any other sections in extra_fields
             config.extra_fields[header] = body

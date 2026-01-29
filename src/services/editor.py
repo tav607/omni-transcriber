@@ -271,15 +271,9 @@ def _build_normal_result(
         if isinstance(value, list):
             for item in value:
                 if isinstance(item, dict):
-                    # Handle list of dicts: first key gets bullet, rest use <br> for PDF line break
-                    first = True
-                    for k, v in item.items():
-                        key_upper = k.upper()
-                        if first:
-                            parts.append(f"- **{key_upper}**: {v}")
-                            first = False
-                        else:
-                            parts.append(f"  <br>**{key_upper}**: {v}")
+                    # Handle list of dicts: join all key-values with <br> followed by two spaces
+                    kv_parts = [f"**{k.upper()}**: {v}" for k, v in item.items()]
+                    parts.append(f"- {'<br>  '.join(kv_parts)}")
                 else:
                     parts.append(f"- {item}")
         elif isinstance(value, dict):

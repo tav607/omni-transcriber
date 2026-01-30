@@ -432,11 +432,38 @@ async def _upload_file(
     client: genai.Client, file_path: str, mime_type: str
 ) -> types.File:
     """Upload a file to Gemini File API."""
-    return await asyncio.to_thread(
-        client.files.upload,
-        file=file_path,
-        config=types.UploadFileConfig(mime_type=mime_type),
-    )
+    path = Path(file_path)
+    original_name = path.name
+
+    # Check if filename contains non-ASCII characters
+    try:
+        original_name.encode("ascii")
+        # ASCII-safe, upload directly
+        return await asyncio.to_thread(
+            client.files.upload,
+            file=file_path,
+            config=types.UploadFileConfig(mime_type=mime_type),
+        )
+    except UnicodeEncodeError:
+        # Non-ASCII filename, copy to temp file with safe name
+        logger.debug(f"Non-ASCII filename detected: {original_name}, using temp file")
+        with tempfile.NamedTemporaryFile(
+            suffix=path.suffix, prefix="upload_", delete=False
+        ) as tmp:
+            tmp_path = tmp.name
+        try:
+            shutil.copy2(file_path, tmp_path)
+            return await asyncio.to_thread(
+                client.files.upload,
+                file=tmp_path,
+                config=types.UploadFileConfig(mime_type=mime_type),
+            )
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 async def _transcribe_audio(

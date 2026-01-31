@@ -25,6 +25,11 @@ OVERLAP_SECONDS = 10
 MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # 90 minutes in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
 
+# Timeout for transcription API calls (15 minutes per chunk, generous for long audio)
+TRANSCRIPTION_TIMEOUT_SECONDS = 15 * 60
+# Timeout for file upload (5 minutes, should be enough for ~100MB files)
+UPLOAD_TIMEOUT_SECONDS = 5 * 60
+
 # Default transcription prompt (for non-podcast sources)
 TRANSCRIPTION_PROMPT = (
     "Transcribe this audio verbatim. If the language is Chinese, please use Simplified "
@@ -435,15 +440,27 @@ async def _upload_file(
     path = Path(file_path)
     original_name = path.name
 
+    async def _do_upload(upload_path: str) -> types.File:
+        """Perform upload with timeout."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.files.upload,
+                    file=upload_path,
+                    config=types.UploadFileConfig(mime_type=mime_type),
+                ),
+                timeout=UPLOAD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"File upload timed out after {UPLOAD_TIMEOUT_SECONDS // 60} minutes."
+            )
+
     # Check if filename contains non-ASCII characters
     try:
         original_name.encode("ascii")
         # ASCII-safe, upload directly
-        return await asyncio.to_thread(
-            client.files.upload,
-            file=file_path,
-            config=types.UploadFileConfig(mime_type=mime_type),
-        )
+        return await _do_upload(file_path)
     except UnicodeEncodeError:
         # Non-ASCII filename, copy to temp file with safe name
         logger.debug(f"Non-ASCII filename detected: {original_name}, using temp file")
@@ -453,11 +470,7 @@ async def _upload_file(
             tmp_path = tmp.name
         try:
             shutil.copy2(file_path, tmp_path)
-            return await asyncio.to_thread(
-                client.files.upload,
-                file=tmp_path,
-                config=types.UploadFileConfig(mime_type=mime_type),
-            )
+            return await _do_upload(tmp_path)
         finally:
             # Clean up temp file
             try:
@@ -501,7 +514,16 @@ async def _transcribe_audio(
             ),
         )
 
-    response = await asyncio.to_thread(_generate)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(_generate),
+            timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError(
+            f"Transcription timed out after {TRANSCRIPTION_TIMEOUT_SECONDS // 60} minutes. "
+            "The audio chunk may be too long or the API is unresponsive."
+        )
 
     # Validate response
     text = response.text

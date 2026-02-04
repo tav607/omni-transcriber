@@ -5,7 +5,7 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 ## Features
 
 - Transcribe audio from YouTube, Bilibili, Apple Podcasts, and Xiaoyuzhou (小宇宙)
-- Transcribe uploaded audio files (mp3, m4a, wav, webm, ogg, flac)
+- Transcribe uploaded audio files (mp3, m4a, mp4, wav, webm, ogg, flac)
 - Support large audio files up to 2GB via Local Bot API Server
 - Generate formatted transcripts with summary and key points
 - Output as both Markdown and PDF files

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 H1_TITLE_PATTERN = re.compile(r"^#\s+(.+?)$", re.MULTILINE)
 
 # Supported audio extensions
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".webm", ".ogg", ".flac", ".aac"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".wav", ".webm", ".ogg", ".flac", ".aac"}
 
 # Pattern for valid Dropbox paths (no control characters, no '..' traversal)
 VALID_PATH_PATTERN = re.compile(r"^/[^\x00-\x1f]*$")

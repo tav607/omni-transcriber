@@ -686,9 +686,17 @@ async def _process_apple_podcast(
     else:
         logger.warning("Could not get podcast metadata, proceeding without context")
 
-    # Step 2: Download audio
+    # Step 2: Download audio (prefer RSS audio URL over yt-dlp)
     await status_message.edit_text("⏬ Downloading podcast audio...")
-    download_result = await download_audio(url, request_temp_dir)
+    if episode_metadata and episode_metadata.audio_url:
+        logger.info(f"Using RSS audio URL: {episode_metadata.audio_url[:100]}...")
+        download_result = await download_audio_from_url(
+            audio_url=episode_metadata.audio_url,
+            output_dir=request_temp_dir,
+            filename_prefix="pod",
+        )
+    else:
+        download_result = await download_audio(url, request_temp_dir)
     audio_path = download_result.audio_path
 
     # Step 3: Transcribe with metadata context

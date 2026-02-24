@@ -15,6 +15,20 @@ from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
+# Module-level client cache: reuse genai.Client to avoid recreating HTTP connection pools
+_client_cache: dict[str, genai.Client] = {}
+
+
+def _get_client(api_key: str) -> genai.Client:
+    """Get or create a shared genai.Client for the given API key."""
+    if api_key not in _client_cache:
+        _client_cache[api_key] = genai.Client(
+            api_key=api_key,
+            http_options={"base_url": "https://generativelanguage.googleapis.com"},
+        )
+    return _client_cache[api_key]
+
+
 # Chunk size for transcript editing (characters)
 CHUNK_SIZE = 32000  # 32K characters per chunk for raw transcript editing
 CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
@@ -558,11 +572,8 @@ async def edit(
 
     logger.info("Starting transcript editing (two-step processing)...")
 
-    # Initialize client
-    client = genai.Client(
-        api_key=config.api_key,
-        http_options={"base_url": "https://generativelanguage.googleapis.com"},
-    )
+    # Get shared client (reuses HTTP connection pool)
+    client = _get_client(config.api_key)
 
     # Configure thinking budgets for different steps
     # Raw editing and translation use low thinking (simple cleanup tasks)
@@ -962,11 +973,8 @@ async def edit_podcast(
 
     logger.info("Starting podcast transcript editing (two-step processing)...")
 
-    # Initialize client
-    client = genai.Client(
-        api_key=config.api_key,
-        http_options={"base_url": "https://generativelanguage.googleapis.com"},
-    )
+    # Get shared client (reuses HTTP connection pool)
+    client = _get_client(config.api_key)
 
     # Configure thinking budgets for different steps
     # Raw editing uses low thinking (simple cleanup tasks)

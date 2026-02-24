@@ -150,8 +150,9 @@ def _download_with_ytdlp(
         if info is None:
             raise DownloadError("Failed to extract video info")
 
-        # Extract metadata from info dict
+        # Extract metadata from info dict, then release the large info dict
         metadata = _extract_metadata(info)
+        del info
 
         # The output file should be video_id.mp3 after postprocessing
         output_path = os.path.join(output_dir, f"{video_id}.mp3")
@@ -322,10 +323,13 @@ def _download_direct_url(
         info = ydl.extract_info(url, download=True)
 
     # Try to get the actual downloaded filename from yt-dlp info
+    filepath = None
     if info and "requested_downloads" in info and info["requested_downloads"]:
         filepath = info["requested_downloads"][0].get("filepath")
-        if filepath and os.path.exists(filepath):
-            return filepath
+    del info  # Release the large info dict early
+
+    if filepath and os.path.exists(filepath):
+        return filepath
 
     # Fallback: search for files with common audio extensions
     audio_extensions = ["mp3", "m4a", "webm", "opus", "wav", "ogg", "aac"]

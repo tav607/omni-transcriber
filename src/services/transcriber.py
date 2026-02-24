@@ -19,6 +19,19 @@ from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
+# Module-level client cache: reuse genai.Client to avoid recreating HTTP connection pools
+_client_cache: dict[str, genai.Client] = {}
+
+
+def _get_client(api_key: str) -> genai.Client:
+    """Get or create a shared genai.Client for the given API key."""
+    if api_key not in _client_cache:
+        _client_cache[api_key] = genai.Client(
+            api_key=api_key,
+            http_options={"base_url": "https://generativelanguage.googleapis.com"},
+        )
+    return _client_cache[api_key]
+
 # Audio splitting constants
 MAX_DURATION_MINUTES = 90
 OVERLAP_SECONDS = 10
@@ -305,11 +318,8 @@ async def transcribe(
 
     logger.info("Starting audio transcription processing...")
 
-    # Initialize client
-    client = genai.Client(
-        api_key=config.api_key,
-        http_options={"base_url": "https://generativelanguage.googleapis.com"},
-    )
+    # Get shared client (reuses HTTP connection pool)
+    client = _get_client(config.api_key)
 
     audio_path_obj = Path(audio_path)
     if not audio_path_obj.exists():

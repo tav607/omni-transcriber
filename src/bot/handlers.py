@@ -598,6 +598,7 @@ async def _process_video_url(
             metadata=editor_metadata,
             on_status=lambda s: logger.info(s),
         )
+        del raw_transcript  # Free memory early
 
         # Generate output files
         await status_message.edit_text("📄 Generating output files...")
@@ -739,6 +740,7 @@ async def _process_apple_podcast(
         metadata=editor_metadata,
         on_status=lambda s: logger.info(s),
     )
+    del raw_transcript  # Free memory early
 
     # Step 5: Generate output files
     await status_message.edit_text("📄 Generating output files...")
@@ -871,6 +873,7 @@ async def _process_xiaoyuzhou_podcast(
         metadata=editor_metadata,
         on_status=lambda s: logger.info(s),
     )
+    del raw_transcript  # Free memory early
 
     # Step 6: Generate output files
     await status_message.edit_text("📄 Generating output files...")
@@ -1040,6 +1043,7 @@ async def _process_audio_file(
             metadata=editor_metadata,
             on_status=lambda s: logger.info(s),
         )
+        del raw_transcript  # Free memory early
 
         # Generate output files
         await status_message.edit_text("📄 Generating output files...")

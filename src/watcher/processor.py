@@ -319,6 +319,7 @@ async def process_audio_file(
             background=context.background,
             on_status=lambda s: logger.info(f"Edit: {s}"),
         )
+        del raw_transcript  # Free memory early
         logger.info(f"Editing complete, length: {len(edited_transcript)}")
 
         # Step 4: Generate output files

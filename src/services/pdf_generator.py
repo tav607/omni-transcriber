@@ -9,6 +9,9 @@ from weasyprint.text.fonts import FontConfiguration
 
 logger = logging.getLogger(__name__)
 
+# Reuse a single FontConfiguration to avoid repeated fontconfig/Pango C-level allocations
+_font_config = FontConfiguration()
+
 
 # Pattern to strip HTML tags that could be injected
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
@@ -268,10 +271,7 @@ async def generate_pdf(markdown_content: str, output_path: str) -> str:
 
 def _generate_pdf_sync(html_content: str, output_path: str) -> None:
     """Generate PDF synchronously (for thread pool execution)."""
-    # Configure fonts
-    font_config = FontConfiguration()
-
     # Use custom url_fetcher to block all external resources (SSRF prevention)
     html = HTML(string=html_content, url_fetcher=_safe_url_fetcher)
-    css = CSS(string=DEFAULT_CSS, font_config=font_config)
-    html.write_pdf(output_path, stylesheets=[css], font_config=font_config)
+    css = CSS(string=DEFAULT_CSS, font_config=_font_config)
+    html.write_pdf(output_path, stylesheets=[css], font_config=_font_config)

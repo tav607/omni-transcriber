@@ -17,6 +17,6 @@ VERSION=$(uv run yt-dlp --version)
 git add uv.lock
 git commit -m "Update yt-dlp to ${VERSION}"
 git push
-pm2 restart omni-transcriber
+sudo systemctl restart omni-transcriber
 
 echo "yt-dlp updated to ${VERSION}, bot restarted."

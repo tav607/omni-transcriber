@@ -58,5 +58,5 @@ For handling audio files larger than 20MB (Telegram's default limit), deploy a L
 
 **File Permission Handling**: The Docker container runs as `messagebus` user and creates files with `640` permissions. To allow the bot to read these files:
 1. Add bot user to `messagebus` group: `sudo usermod -a -G messagebus $USER`
-2. Use `run_bot.sh` wrapper script with `sg messagebus` to run bot with group permissions
-3. Start with pm2: `pm2 start run_bot.sh --name omni-transcriber`
+2. The systemd service uses `SupplementaryGroups=messagebus` for group permissions
+3. Restart service: `sudo systemctl restart omni-transcriber`

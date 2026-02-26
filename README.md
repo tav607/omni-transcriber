@@ -160,12 +160,12 @@ sudo usermod -a -G messagebus $USER
 newgrp messagebus
 ```
 
-Use the wrapper script `run_bot.sh` to run the bot with proper group permissions:
+The bot is managed by systemd with `SupplementaryGroups=messagebus` for proper group permissions:
 
 ```bash
-# Start with pm2
-pm2 start run_bot.sh --name omni-transcriber
-pm2 save
+sudo systemctl start omni-transcriber
+sudo systemctl status omni-transcriber
+journalctl -u omni-transcriber -f
 ```
 
 ### 4. First-time Setup

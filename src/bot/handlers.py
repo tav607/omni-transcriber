@@ -31,8 +31,8 @@ settings_store.init()
 
 # Model options
 MODELS = {
-    "flash": "gemini-3-flash-preview",
-    "pro": "gemini-3-pro-preview",
+    "flash": "gemini-flash-latest",
+    "pro": "gemini-pro-latest",
 }
 
 # Default models

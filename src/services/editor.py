@@ -66,6 +66,15 @@ def _has_meaningful_content(chunk: str) -> bool:
     return len(text) >= MIN_MEANINGFUL_CONTENT
 
 
+def _normalize_quotes(text: str) -> str:
+    """Normalize smart/curly quotes to ASCII equivalents.
+
+    Gemini models output smart quotes (U+2018/2019/201C/201D) which render
+    as overly wide characters in monospace fonts and PDFs.
+    """
+    return text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201C", '"').replace("\u201D", '"')
+
+
 USER_PROMPT_PREFIX = "Here's the transcript:\n\n"
 
 # Default sections for metadata generation (used when no CONTEXT.md override)
@@ -700,6 +709,7 @@ async def edit(
     # Step 3: Assemble final Markdown
     # ============================================
     final_output = _build_normal_result(metadata_dict, final_transcript)
+    final_output = _normalize_quotes(final_output)
 
     logger.info(f"Editing completed, output length: {len(final_output)}")
 
@@ -1275,7 +1285,7 @@ def _build_podcast_result(
         qa_pairs=qa_pairs,
         highlights=highlights,
         full_transcript=edited_transcript,
-        markdown=markdown,
+        markdown=_normalize_quotes(markdown),
     )
 
 

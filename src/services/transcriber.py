@@ -33,7 +33,7 @@ def _get_client(api_key: str) -> genai.Client:
     return _client_cache[api_key]
 
 # Audio splitting constants
-MAX_DURATION_MINUTES = 90
+MAX_DURATION_MINUTES = 45
 OVERLAP_SECONDS = 10
 MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # 90 minutes in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds

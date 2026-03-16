@@ -169,10 +169,7 @@ async def _generate_normal_metadata(
         if metadata.upload_date:
             parts.append(f"- Date: {metadata.upload_date}")
         if metadata.description:
-            desc_truncated = metadata.description[:1500]
-            if len(metadata.description) > 1500:
-                desc_truncated += "..."
-            parts.append(f"- Description: {desc_truncated}")
+            parts.append(f"- Description: {metadata.description}")
         parts.append("")
     elif background:
         parts.append("## Background Information")

@@ -692,7 +692,7 @@ async def edit(
             lambda: _translate_transcript(
                 client,
                 edited_transcript,
-                config.model,
+                config.translation_model,
                 config.temperature,
                 thinking_budget_low,  # Translation uses low thinking
             ),

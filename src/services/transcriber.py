@@ -35,7 +35,7 @@ def _get_client(api_key: str) -> genai.Client:
 # Audio splitting constants
 MAX_DURATION_MINUTES = 45
 OVERLAP_SECONDS = 10
-MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # 90 minutes in milliseconds
+MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
 
 # Timeout for transcription API calls (15 minutes per chunk, generous for long audio)
@@ -239,12 +239,120 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
     return chunks, duration_ms
 
 
+# Overlap detection constants
+_PUNCT_RE = re.compile(
+    r'[\s\u3000。，、！？：；「」『』（）【】\u201c\u201d\u2018\u2019'
+    r'\u2026\u2014\u00b7\.\,\!\?\:\;\"\'\(\)\[\]\-\n\r\t>]'
+)
+# Safety cap: never skip more than this many characters (prevents data loss
+# from false-positive overlap detection)
+MAX_OVERLAP_SKIP = 1500
+
+
+def _strip_for_matching(text: str) -> str:
+    """Strip whitespace and punctuation for fuzzy overlap matching."""
+    return _PUNCT_RE.sub('', text)
+
+
+def _find_overlap_length(prev_text: str, next_text: str) -> int:
+    """
+    Detect how many leading characters of *next_text* duplicate content
+    from near the end of *prev_text*.
+
+    Uses 8-character n-gram density in a sliding window, which is robust
+    to the minor wording and punctuation differences that Gemini produces
+    when the same audio appears in two overlapping chunks.
+
+    Returns the number of characters to skip from the start of next_text
+    (0 if no overlap is detected).
+    """
+    SEARCH_LEN = 2000       # chars to inspect in each chunk
+    NGRAM_SIZE = 8           # n-gram length (8 CJK chars ≈ very specific)
+    WINDOW_SIZE = 80         # sliding-window width in stripped chars
+    WINDOW_STEP = 40         # step size
+    MATCH_THRESHOLD = 0.3    # 30 % of n-grams must hit
+
+    prev_tail = prev_text[-SEARCH_LEN:] if len(prev_text) > SEARCH_LEN else prev_text
+    next_head = next_text[:SEARCH_LEN] if len(next_text) > SEARCH_LEN else next_text
+
+    prev_clean = _strip_for_matching(prev_tail)
+    next_clean = _strip_for_matching(next_head)
+
+    if len(prev_clean) < NGRAM_SIZE or len(next_clean) < WINDOW_SIZE:
+        return 0  # not enough text for reliable n-gram matching
+
+    # Build n-gram index from previous chunk's tail
+    prev_ngrams: set[str] = {
+        prev_clean[j:j + NGRAM_SIZE]
+        for j in range(len(prev_clean) - NGRAM_SIZE + 1)
+    }
+
+    # Fix 3: Anchor check — overlap must start at the beginning of next chunk.
+    # If the first window doesn't match, there is no boundary overlap.
+    first_window = next_clean[:WINDOW_SIZE]
+    first_num = max(1, len(first_window) - NGRAM_SIZE + 1)
+    first_hits = sum(
+        1 for k in range(first_num)
+        if first_window[k:k + NGRAM_SIZE] in prev_ngrams
+    )
+    if first_hits / first_num < MATCH_THRESHOLD:
+        return 0
+
+    # Scan next chunk's head: while n-gram density stays high, we are in
+    # the overlap region.  Once it drops, new content has begun.
+    overlap_end_clean = 0
+    for start in range(0, max(1, len(next_clean) - WINDOW_SIZE + 1), WINDOW_STEP):
+        window = next_clean[start:start + WINDOW_SIZE]
+        # Fix 1: use actual window length, not fixed WINDOW_SIZE
+        window_len = len(window)
+        num_ngrams = max(1, window_len - NGRAM_SIZE + 1)
+        hits = sum(
+            1 for k in range(num_ngrams)
+            if window[k:k + NGRAM_SIZE] in prev_ngrams
+        )
+        if hits / num_ngrams >= MATCH_THRESHOLD:
+            overlap_end_clean = start + window_len
+        elif overlap_end_clean > 0:
+            break  # transition from overlap → new content
+
+    if overlap_end_clean == 0:
+        return 0
+
+    # Clamp to actual cleaned text length
+    overlap_end_clean = min(overlap_end_clean, len(next_clean))
+
+    # Map stripped-text position back to original next_head offset
+    clean_count = 0
+    orig_pos = len(next_head)
+    for idx, ch in enumerate(next_head):
+        if not _PUNCT_RE.match(ch):
+            clean_count += 1
+        if clean_count >= overlap_end_clean:
+            orig_pos = idx + 1
+            break
+
+    # Fix 2: Snap forward with a tight tolerance (50 chars) for a clean cut.
+    # Larger jumps risk discarding non-duplicated content.
+    SNAP_LIMIT = 50
+    for j in range(orig_pos, min(orig_pos + SNAP_LIMIT, len(next_text))):
+        if (next_text[j] == '\n'
+                and j + 1 < len(next_text)
+                and next_text[j + 1] == '\n'):
+            return j + 2
+    for j in range(orig_pos, min(orig_pos + SNAP_LIMIT, len(next_text))):
+        if next_text[j] in '。.！!？?\n':
+            return j + 1
+
+    return orig_pos
+
+
 def _merge_transcriptions(transcripts: List[str]) -> str:
     """
-    Merge multiple transcript chunks, handling the overlap regions.
+    Merge multiple transcript chunks, removing duplicated content at boundaries.
 
-    Uses sentence boundary detection to find and remove duplicated content
-    at chunk boundaries.
+    Uses character n-gram density matching, which is robust to the minor
+    transcription variations that Gemini produces when the same audio segment
+    appears in overlapping chunks.
 
     Args:
         transcripts: List of transcript strings to merge
@@ -259,36 +367,18 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
 
     for i in range(1, len(transcripts)):
         current = transcripts[i]
-
-        # Extract overlap search regions
-        # 10 seconds of audio ≈ 30-80 Chinese chars or 20-50 English words
-        # Use 500 chars to have sufficient margin
-        overlap_search_len = 500
-        prev_end = merged[-overlap_search_len:] if len(merged) > overlap_search_len else merged
-        curr_start = current[:overlap_search_len] if len(current) > overlap_search_len else current
-
-        best_match_pos = -1
-        best_match_len = 0
-
-        # Look for sentence boundaries in the overlap region
-        # Support both Chinese and English punctuation
-        sentences_prev = re.split(r'[。！？\.\!\?]', prev_end)
-        for sent in sentences_prev:
-            sent = sent.strip()
-            if len(sent) > 20 and sent in curr_start:
-                pos = curr_start.find(sent)
-                if pos >= 0 and len(sent) > best_match_len:
-                    best_match_pos = pos
-                    best_match_len = len(sent)
-
-        if best_match_pos >= 0:
-            # Found overlap, skip the duplicated part
-            current = current[best_match_pos + best_match_len:].lstrip()
-            logger.debug(f"Found overlap of {best_match_len} chars at chunk {i}")
+        skip = _find_overlap_length(merged, current)
+        if skip > MAX_OVERLAP_SKIP:
+            logger.warning(
+                f"Overlap skip {skip} exceeds safety limit {MAX_OVERLAP_SKIP} "
+                f"at chunk {i}, ignoring to prevent data loss"
+            )
+            skip = 0
+        if skip > 0:
+            current = current[skip:].lstrip()
+            logger.info(f"Removed {skip} chars of overlapping content at chunk {i}")
         else:
-            # No clear overlap found, just concatenate with newline
-            logger.debug(f"No clear overlap found at chunk {i}, concatenating")
-
+            logger.debug(f"No overlap detected at chunk {i}, concatenating")
         merged = merged + "\n\n" + current
 
     return merged
@@ -302,7 +392,7 @@ async def transcribe(
 ) -> str:
     """
     Transcribe audio file using Gemini API.
-    Supports automatic chunking for audio longer than 90 minutes.
+    Supports automatic chunking for audio longer than 45 minutes.
 
     Args:
         audio_path: Path to the audio file to transcribe

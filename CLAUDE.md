@@ -21,7 +21,8 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 
 ### Processing Pipeline
 
-1. **Input**: YouTube/Bilibili/Apple Podcasts URL → `services/downloader.py` downloads audio via yt-dlp
+1. **Input**: YouTube/Bilibili URL → `services/downloader.py` downloads audio via yt-dlp
+   **or** Apple Podcasts URL → `services/rss_parser.py` resolves RSS feed via iTunes Lookup API and locates the episode (by iTunes ID, then URL-slug title match) → `services/downloader.py` downloads from the RSS audio URL
    **or** Xiaoyuzhou URL → `services/xiaoyuzhou_parser.py` fetches audio URL via RSSHub → `services/downloader.py` downloads
    **or** Audio file upload → downloaded from Telegram
 2. **Transcription**: `services/transcriber.py` uploads audio to Gemini File API, transcribes with Gemini model
@@ -35,6 +36,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 - `src/bot/bot.py` - Bot initialization, command registration (whitelist-aware)
 - `src/bot/middleware.py` - Chat ID authorization middleware
 - `src/services/downloader.py` - Audio download via yt-dlp (YouTube/Bilibili/direct URLs)
+- `src/services/rss_parser.py` - Apple Podcasts RSS feed lookup and episode matching (iTunes ID + slug-based title match)
 - `src/services/xiaoyuzhou_parser.py` - Xiaoyuzhou podcast metadata extraction via RSSHub
 - `src/utils/retry.py` - Retry wrapper for API calls
 - `src/utils/url_parser.py` - YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou URL detection

@@ -11,6 +11,8 @@ from typing import Optional
 import aiohttp
 import feedparser
 
+from ..utils.url_parser import extract_apple_podcasts_slug
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; OmniTranscriber/1.0)"
@@ -40,6 +42,13 @@ def extract_podcast_id(apple_url: str) -> Optional[str]:
     if match:
         return match.group(1)
     return None
+
+
+def _normalize_title(s: str) -> str:
+    """Lowercase and strip non-alphanumeric chars (Unicode word chars only)."""
+    if not s:
+        return ""
+    return re.sub(r"\W+", "", s.lower(), flags=re.UNICODE)
 
 
 def extract_episode_id(apple_url: str) -> Optional[str]:
@@ -145,8 +154,10 @@ async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:
         logger.error(f"Could not extract podcast ID from URL: {apple_url}")
         return None
 
-    # Extract episode ID (if present in URL)
     target_episode_id = extract_episode_id(apple_url)
+    target_slug_norm = ""
+    if target_episode_id:
+        target_slug_norm = _normalize_title(extract_apple_podcasts_slug(apple_url) or "")
 
     # Get feed URL
     feed_url = await get_feed_url(podcast_id)
@@ -168,24 +179,39 @@ async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:
 
         podcast_name = feed.feed.get("title", "Unknown Podcast")
 
-        # If we have a target episode ID, try to find that specific episode
-        # Otherwise, return the most recent episode
         target_entry = None
 
-        for entry in feed.entries:
-            # Check if this is the target episode by ID
-            if target_episode_id:
-                # iTunes episode ID might be in guid or other fields
-                entry_id = entry.get("id", "") or entry.get("guid", "")
-                if target_episode_id in str(entry_id):
-                    target_entry = entry
-                    break
+        if target_episode_id:
+            # Apple's iTunes episode ID often isn't in the feed's guid/id (e.g.
+            # Ximalaya-hosted feeds use their own ID space), so fall back to
+            # matching the URL slug against entry titles.
+            slug_match_enabled = bool(target_slug_norm) and len(target_slug_norm) >= 6
+            id_match = exact = contains = None
 
-        # If no specific episode found, use the first (most recent) entry
-        if target_entry is None and feed.entries:
+            for entry in feed.entries:
+                if id_match is None and any(
+                    target_episode_id in str(entry.get(k, "")) for k in ("id", "guid")
+                ):
+                    id_match = entry
+                    break
+                if slug_match_enabled and exact is None:
+                    n = _normalize_title(entry.get("title", ""))
+                    if not n:
+                        continue
+                    if n == target_slug_norm:
+                        exact = entry
+                    elif contains is None and target_slug_norm in n:
+                        contains = entry
+
+            target_entry = id_match or exact or contains
+
+            if target_entry is None:
+                logger.error(
+                    f"Could not locate episode {target_episode_id} (slug={target_slug_norm!r}) in feed {feed_url}"
+                )
+                return None
+        elif feed.entries:
             target_entry = feed.entries[0]
-            if target_episode_id:
-                logger.warning(f"Could not find episode {target_episode_id}, using most recent")
 
         if target_entry is None:
             logger.error("No episodes found in feed")

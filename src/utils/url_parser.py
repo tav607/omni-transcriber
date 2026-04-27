@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Valid YouTube domains
 YOUTUBE_DOMAINS = frozenset(["youtube.com", "youtu.be", "youtube-nocookie.com"])
@@ -287,6 +287,31 @@ def extract_apple_podcasts_id(url: str) -> str | None:
         # Return just podcast ID if no episode specified
         return podcast_id
 
+    except Exception:
+        return None
+
+
+def extract_apple_podcasts_slug(url: str) -> str | None:
+    """
+    Extract the URL-decoded episode (or podcast) slug from an Apple Podcasts URL.
+
+    For URLs like /podcast/{slug}/id{podcast_id}[?i=...], the slug encodes the
+    episode title (when ?i= is present) or the podcast title otherwise.
+    """
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url.strip())
+        if not _is_apple_podcasts_host((parsed.hostname or "").lower()):
+            return None
+
+        match = re.search(r"/podcast/([^/]+)/id\d+", parsed.path)
+        if not match:
+            return None
+
+        slug = unquote(match.group(1))
+        return slug or None
     except Exception:
         return None
 

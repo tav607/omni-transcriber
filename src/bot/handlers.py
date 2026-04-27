@@ -19,7 +19,7 @@ from ..utils import settings_store
 from ..services.downloader import download_audio, download_audio_from_url, DownloadResult, VideoMetadata
 from ..services.transcriber import transcribe, TranscriptionMetadata
 from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata, VideoEditorMetadata
-from ..services.rss_parser import get_episode_metadata
+from ..services.rss_parser import get_episode_metadata, extract_episode_id
 from ..services.xiaoyuzhou_parser import get_episode_metadata as get_xiaoyuzhou_metadata
 from ..services.pdf_generator import generate_pdf
 
@@ -684,6 +684,15 @@ async def _process_apple_podcast(
 
     if episode_metadata:
         logger.info(f"Got podcast metadata: {episode_metadata.podcast_name} - {episode_metadata.episode_title}")
+    elif extract_episode_id(url):
+        # A specific episode was requested but we couldn't locate it. Abort
+        # instead of silently transcribing a different episode.
+        await status_message.edit_text(
+            "❌ Couldn't locate this episode in the podcast feed. "
+            "The RSS feed may use a different episode ID scheme — try the Xiaoyuzhou "
+            "or original-source URL instead."
+        )
+        return
     else:
         logger.warning("Could not get podcast metadata, proceeding without context")
 

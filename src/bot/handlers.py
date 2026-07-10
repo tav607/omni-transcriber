@@ -35,8 +35,10 @@ MODELS = {
     "pro": "gemini-pro-latest",
 }
 
-# Default models
-DEFAULT_TRANSCRIBER_MODEL = "flash"
+# Default models. Transcription accuracy is the floor for the whole pipeline,
+# so the transcriber defaults to pro, matching the env-level TranscriberConfig
+# default (chats that picked a model explicitly keep their stored choice).
+DEFAULT_TRANSCRIBER_MODEL = "pro"
 DEFAULT_EDITOR_MODEL = "pro"
 
 # Supported audio MIME types

@@ -248,10 +248,29 @@ _PUNCT_RE = re.compile(
 # from false-positive overlap detection)
 MAX_OVERLAP_SKIP = 1500
 
+# Speaker-label tokens (**Name:** / **Host:** / **Speaker 1:**). Adjacent audio
+# chunks label the same overlap speech independently and often differently, so
+# label text must not enter the n-gram matching or it poisons the seam detection.
+_SPEAKER_TOKEN_RE = re.compile(r'\*\*[^*\n]{1,40}[:：]\*\*')
+
+
+def _strip_for_matching_with_map(text: str) -> tuple[str, list[int]]:
+    """Strip speaker labels, whitespace, and punctuation for fuzzy overlap
+    matching. Returns (clean_text, mapping) where mapping[i] is the index in
+    `text` of clean_text[i], so match positions can be projected back."""
+    masked = _SPEAKER_TOKEN_RE.sub(lambda m: ' ' * len(m.group(0)), text)
+    clean_chars: list[str] = []
+    mapping: list[int] = []
+    for idx, ch in enumerate(masked):
+        if not _PUNCT_RE.match(ch):
+            clean_chars.append(ch)
+            mapping.append(idx)
+    return ''.join(clean_chars), mapping
+
 
 def _strip_for_matching(text: str) -> str:
-    """Strip whitespace and punctuation for fuzzy overlap matching."""
-    return _PUNCT_RE.sub('', text)
+    """Strip whitespace, punctuation, and speaker labels for fuzzy overlap matching."""
+    return _strip_for_matching_with_map(text)[0]
 
 
 def _find_overlap_length(prev_text: str, next_text: str) -> int:
@@ -276,7 +295,7 @@ def _find_overlap_length(prev_text: str, next_text: str) -> int:
     next_head = next_text[:SEARCH_LEN] if len(next_text) > SEARCH_LEN else next_text
 
     prev_clean = _strip_for_matching(prev_tail)
-    next_clean = _strip_for_matching(next_head)
+    next_clean, next_map = _strip_for_matching_with_map(next_head)
 
     if len(prev_clean) < NGRAM_SIZE or len(next_clean) < WINDOW_SIZE:
         return 0  # not enough text for reliable n-gram matching
@@ -321,15 +340,10 @@ def _find_overlap_length(prev_text: str, next_text: str) -> int:
     # Clamp to actual cleaned text length
     overlap_end_clean = min(overlap_end_clean, len(next_clean))
 
-    # Map stripped-text position back to original next_head offset
-    clean_count = 0
-    orig_pos = len(next_head)
-    for idx, ch in enumerate(next_head):
-        if not _PUNCT_RE.match(ch):
-            clean_count += 1
-        if clean_count >= overlap_end_clean:
-            orig_pos = idx + 1
-            break
+    # Project the clean-text match end back to a position in next_head via the
+    # mapping (label chars were removed from the clean text, so a simple
+    # punctuation-skipping recount would drift).
+    orig_pos = next_map[overlap_end_clean - 1] + 1
 
     # Fix 2: Snap forward with a tight tolerance (50 chars) for a clean cut.
     # Larger jumps risk discarding non-duplicated content.

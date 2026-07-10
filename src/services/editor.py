@@ -11,6 +11,7 @@ from google import genai
 from google.genai import types
 
 from ..config import EditorConfig
+from ..utils.gemini import is_truncated
 from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -231,14 +232,18 @@ async def _generate_normal_metadata(
     # Build system prompt with sections
     system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections)
 
+    # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
+    # must hold the thinking budget (8192 on this path) PLUS the JSON itself.
     response = await _gemini_generate(
         client, model, user_content,
         system=system_prompt, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=8192,
+        thinking_budget=thinking_budget, max_tokens=16384,
     )
 
     if not response.text:
         raise ValueError("Empty metadata response")
+    if is_truncated(response):
+        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
 
     # Parse JSON from response
     response_text = response.text.strip()
@@ -373,6 +378,10 @@ async def _translate_transcript(
     if not response.text:
         logger.warning("Empty translation response, returning original transcript")
         return transcript
+    # A truncated translation replaces the full transcript with a shorter one,
+    # silently dropping the tail; raise so with_retry gets a chance.
+    if is_truncated(response):
+        raise ValueError("Translation hit max output tokens; output is incomplete")
 
     return response.text.strip()
 
@@ -1186,14 +1195,19 @@ async def _generate_podcast_metadata(
 
     user_content = "\n".join(parts)
 
+    # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
+    # must hold the thinking budget (8192 on this path) PLUS the JSON itself;
+    # the podcast JSON (Q&A, highlights) runs long.
     response = await _gemini_generate(
         client, model, user_content,
         system=PODCAST_METADATA_SYSTEM_PROMPT, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=16384,
+        thinking_budget=thinking_budget, max_tokens=24576,
     )
 
     if not response.text:
         raise ValueError("Empty metadata response")
+    if is_truncated(response):
+        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
 
     # Parse JSON from response
     response_text = response.text

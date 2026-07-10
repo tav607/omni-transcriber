@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -10,12 +11,30 @@ from typing import Optional
 
 import aiohttp
 import feedparser
+import requests
 
 from ..utils.url_parser import extract_apple_podcasts_slug
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; OmniTranscriber/1.0)"
+# Browser-like UA: feed.xyzfm.space (Xiaoyuzhou's feed host, common behind
+# Apple feedUrls for Chinese podcasts) returns 403 for bot-style UAs since 2026-06.
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+
+def _fetch_text_sync(url: str, timeout: int = 60) -> Optional[str]:
+    """Synchronous fallback fetch via requests.
+
+    Some feed hosts (anchor.fm, acast.com) stall aiohttp until timeout but
+    respond fine to requests.
+    """
+    try:
+        response = requests.get(url, timeout=timeout, headers={"User-Agent": DEFAULT_USER_AGENT})
+        response.raise_for_status()
+        return response.text
+    except requests.RequestException as e:
+        logger.error(f"Sync fetch failed for {url}: {e}")
+        return None
 
 
 @dataclass
@@ -104,11 +123,26 @@ async def get_feed_url(podcast_id: str) -> Optional[str]:
                     return None
 
     except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching feed URL for podcast {podcast_id}")
-        return None
+        logger.warning(f"aiohttp timeout for iTunes API, falling back to requests")
     except aiohttp.ClientError as e:
-        logger.error(f"HTTP error fetching feed URL: {e}")
+        logger.warning(f"aiohttp error for iTunes API: {e}, falling back to requests")
+
+    text = await asyncio.get_running_loop().run_in_executor(None, _fetch_text_sync, lookup_url)
+    if text is None:
         return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.error(f"iTunes API fallback returned invalid JSON: {e}")
+        return None
+    if data.get("resultCount", 0) == 0:
+        logger.warning(f"No podcast found for ID {podcast_id}")
+        return None
+    feed_url = data["results"][0].get("feedUrl")
+    if not feed_url:
+        logger.warning(f"No feedUrl in response for podcast {podcast_id}")
+        return None
+    return feed_url
 
 
 async def fetch_feed_content(feed_url: str) -> Optional[str]:
@@ -125,11 +159,11 @@ async def fetch_feed_content(feed_url: str) -> Optional[str]:
                 return await response.text()
 
     except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching feed {feed_url}")
-        return None
+        logger.warning(f"aiohttp timeout for {feed_url}, falling back to requests")
     except aiohttp.ClientError as e:
-        logger.error(f"HTTP error fetching feed: {e}")
-        return None
+        logger.warning(f"aiohttp error for {feed_url}: {e}, falling back to requests")
+
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch_text_sync, feed_url)
 
 
 async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:

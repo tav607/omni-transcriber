@@ -10,12 +10,15 @@ from typing import Optional
 
 import aiohttp
 import feedparser
+import requests
 
 from ..config import config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; OmniTranscriber/1.0)"
+# Browser-like UA: xiaoyuzhoufm.com and feed.xyzfm.space return 403 for
+# bot-style UAs since 2026-06.
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 
 @dataclass
@@ -30,8 +33,19 @@ class XiaoyuzhouEpisodeMetadata:
     audio_url: str = ""
 
 
+def _fetch_url_sync(url: str, timeout: int = 60) -> Optional[str]:
+    """Synchronous fallback fetch via requests (some hosts stall aiohttp)."""
+    try:
+        response = requests.get(url, timeout=timeout, headers={"User-Agent": DEFAULT_USER_AGENT})
+        response.raise_for_status()
+        return response.text
+    except requests.RequestException as e:
+        logger.error(f"Sync fetch failed for {url}: {e}")
+        return None
+
+
 async def _fetch_url(url: str, timeout_seconds: int = 30) -> Optional[str]:
-    """Fetch URL content."""
+    """Fetch URL content with aiohttp, falling back to requests if needed."""
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         headers = {"User-Agent": DEFAULT_USER_AGENT}
@@ -44,11 +58,11 @@ async def _fetch_url(url: str, timeout_seconds: int = 30) -> Optional[str]:
                 return await response.text()
 
     except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching {url}")
-        return None
+        logger.warning(f"aiohttp timeout for {url}, falling back to requests")
     except aiohttp.ClientError as e:
-        logger.error(f"HTTP error fetching {url}: {e}")
-        return None
+        logger.warning(f"aiohttp error for {url}: {e}, falling back to requests")
+
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch_url_sync, url)
 
 
 async def get_podcast_id_from_episode(episode_id: str) -> Optional[str]:

@@ -34,6 +34,8 @@ def _get_client(api_key: str) -> genai.Client:
 CHUNK_SIZE = 32000  # 32K characters per chunk for raw transcript editing
 CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
 MIN_MEANINGFUL_CONTENT = 50  # Minimum chars of actual text (excluding timestamps/sound effects)
+# Edited chunk shorter than this fraction of the raw chunk = over-summarized.
+EDIT_MIN_KEEP_RATIO = 0.55
 
 # Text-only Gemini calls (edit/metadata/translate). The SDK sets no request
 # timeout of its own, so without this a hung connection stalls forever (the
@@ -627,12 +629,15 @@ async def edit(
     chunks = _split_into_chunks(transcript)
     logger.info(f"Split transcript into {len(chunks)} chunks for editing")
 
-    if len(chunks) > 1:
-        if on_status:
+    if on_status:
+        if len(chunks) > 1:
             on_status(f"Editing {len(chunks)} chunks in parallel...")
+        else:
+            on_status("Editing transcript...")
 
-        # Process all chunks in parallel
-        async def edit_chunk(chunk: str, index: int) -> str:
+    # Process all chunks in parallel
+    async def edit_chunk(chunk: str, index: int) -> str:
+        try:
             return await with_retry(
                 lambda: _edit_raw_chunk(
                     client,
@@ -649,34 +654,17 @@ async def edit(
                 base_delay_ms=1000,
                 context=f"Editing chunk {index + 1}",
             )
+        except Exception as e:
+            # Last-resort fallback AFTER retries: an unedited chunk beats a
+            # dead run or dropped content.
+            logger.warning(f"Edit chunk {index + 1} failed after retries; keeping the raw chunk: {e}")
+            return chunk
 
-        edit_tasks = [edit_chunk(chunk, i) for i, chunk in enumerate(chunks)]
-        edited_chunks = await asyncio.gather(*edit_tasks)
-        logger.info(f"Edited {len(edited_chunks)} chunks")
+    edited_chunks = await asyncio.gather(*[edit_chunk(c, i) for i, c in enumerate(chunks)])
+    logger.info(f"Edited {len(edited_chunks)} chunks")
 
-        # Combine edited chunks
-        edited_transcript = "\n\n".join(edited_chunks)
-    else:
-        # Single chunk, edit directly
-        if on_status:
-            on_status("Editing transcript...")
-
-        edited_transcript = await with_retry(
-            lambda: _edit_raw_chunk(
-                client,
-                chunks[0],
-                config.model,
-                config.temperature,
-                thinking_budget_low,  # Raw editing uses low thinking
-                0,
-                1,
-                metadata,
-                background,
-            ),
-            max_attempts=3,
-            base_delay_ms=1000,
-            context="Editing transcript",
-        )
+    # Combine edited chunks
+    edited_transcript = "\n\n".join(edited_chunks)
 
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
@@ -792,13 +780,23 @@ async def _edit_raw_chunk(
         thinking_budget=thinking_budget, max_tokens=65536,
     )
 
-    # Validate response
+    # These guards raise so with_retry gets to retry a transient bad edit
+    # (returning the original here would swallow the retry); the caller falls
+    # back to the raw chunk only after retries are exhausted.
     text = response.text
     if not text or text.strip() == "":
-        logger.warning(f"Empty response for chunk {chunk_index + 1}, using original")
-        return chunk
-
-    return text.strip()
+        raise ValueError(f"Edit chunk {chunk_index + 1}/{total_chunks} returned empty result")
+    if is_truncated(response):
+        raise ValueError(f"Edit chunk {chunk_index + 1}/{total_chunks} hit max output tokens")
+    text = text.strip()
+    # Filler-word removal legitimately shrinks a chunk by ~10-25%; much more than
+    # that means the model summarized instead of edited, which loses content.
+    if len(text) < EDIT_MIN_KEEP_RATIO * len(chunk):
+        raise ValueError(
+            f"Edit chunk {chunk_index + 1}/{total_chunks} shrank from {len(chunk)} to "
+            f"{len(text)} chars (likely over-summarized)"
+        )
+    return text
 
 
 async def _generate_final_output(
@@ -1146,13 +1144,23 @@ async def _edit_podcast_raw_chunk(
         thinking_budget=thinking_budget, max_tokens=65536,
     )
 
-    # Validate response
+    # These guards raise so with_retry gets to retry a transient bad edit
+    # (returning the original here would swallow the retry); the caller falls
+    # back to the raw chunk only after retries are exhausted.
     text = response.text
     if not text or text.strip() == "":
-        logger.warning(f"Empty response for chunk {chunk_index + 1}, using original")
-        return chunk
-
-    return text.strip()
+        raise ValueError(f"Edit chunk {chunk_index + 1}/{total_chunks} returned empty result")
+    if is_truncated(response):
+        raise ValueError(f"Edit chunk {chunk_index + 1}/{total_chunks} hit max output tokens")
+    text = text.strip()
+    # Filler-word removal legitimately shrinks a chunk by ~10-25%; much more than
+    # that means the model summarized instead of edited, which loses content.
+    if len(text) < EDIT_MIN_KEEP_RATIO * len(chunk):
+        raise ValueError(
+            f"Edit chunk {chunk_index + 1}/{total_chunks} shrank from {len(chunk)} to "
+            f"{len(text)} chars (likely over-summarized)"
+        )
+    return text
 
 
 async def _generate_podcast_metadata(

@@ -184,9 +184,15 @@ def _translation_schema(paragraph_count: int) -> dict:
     }
 
 
-# Cap concurrent translation calls so a long transcript's chunk fan-out
-# does not trip API rate limits.
-MAX_CONCURRENT_TRANSLATION_CALLS = 6
+# Cap total in-flight editor Gemini calls, shared across edit, podcast-edit,
+# and translation fan-outs (bot and watcher jobs share one event loop, so a
+# per-run cap would still stack). Also keeps the 10-minute wait_for budget
+# honest: without a gate, chunks queue in the default thread pool with their
+# timeout clock already running.
+MAX_CONCURRENT_GEMINI_CALLS = 6
+# Safe at module scope on Python 3.10+: binds to the loop on first await, and
+# the app runs a single asyncio.run loop.
+_gemini_sem = asyncio.Semaphore(MAX_CONCURRENT_GEMINI_CALLS)
 
 
 async def _generate_normal_metadata(
@@ -260,10 +266,11 @@ async def _generate_normal_metadata(
 
     if not response.text:
         raise ValueError("Empty metadata response")
-    if is_truncated(response):
-        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
 
-    # Parse JSON from response
+    # Parse JSON from response. Truncation is checked only after all extraction
+    # strategies fail: a MAX_TOKENS stop can cut trailing chatter AFTER a
+    # complete JSON object, which Strategy 2-4 still rescue (a JSON truncated
+    # mid-object can never balance its braces, so no strategy accepts it).
     response_text = response.text.strip()
 
     # Strategy 1: Try parsing entire response directly (ideal case - LLM followed instructions)
@@ -307,6 +314,8 @@ async def _generate_normal_metadata(
                     except json.JSONDecodeError:
                         continue  # Try next closing brace
 
+    if is_truncated(response):
+        raise ValueError("Metadata generation hit max output tokens and no complete JSON could be extracted")
     raise ValueError(f"No valid JSON found in metadata output: {response_text[:500]}")
 
 
@@ -418,10 +427,9 @@ async def _translate_transcript(
     propagate and leave orphaned sibling tasks running."""
     logger.info("Adding inline translations to transcript...")
     chunks = _split_into_chunks(transcript)
-    sem = asyncio.Semaphore(MAX_CONCURRENT_TRANSLATION_CALLS)
 
     async def translate_one(chunk: str) -> str:
-        async with sem:
+        async with _gemini_sem:
             try:
                 return await with_retry(
                     lambda: _translate_chunk(client, chunk, model, temperature),
@@ -657,30 +665,31 @@ async def edit(
         else:
             on_status("Editing transcript...")
 
-    # Process all chunks in parallel
+    # Process all chunks in parallel (bounded by the shared semaphore)
     async def edit_chunk(chunk: str, index: int) -> str:
-        try:
-            return await with_retry(
-                lambda: _edit_raw_chunk(
-                    client,
-                    chunk,
-                    config.model,
-                    config.temperature,
-                    thinking_budget_low,  # Raw editing uses low thinking
-                    index,
-                    len(chunks),
-                    metadata,
-                    background,
-                ),
-                max_attempts=3,
-                base_delay_ms=1000,
-                context=f"Editing chunk {index + 1}",
-            )
-        except Exception as e:
-            # Last-resort fallback AFTER retries: an unedited chunk beats a
-            # dead run or dropped content.
-            logger.warning(f"Edit chunk {index + 1} failed after retries; keeping the raw chunk: {e}")
-            return chunk
+        async with _gemini_sem:
+            try:
+                return await with_retry(
+                    lambda: _edit_raw_chunk(
+                        client,
+                        chunk,
+                        config.model,
+                        config.temperature,
+                        thinking_budget_low,  # Raw editing uses low thinking
+                        index,
+                        len(chunks),
+                        metadata,
+                        background,
+                    ),
+                    max_attempts=3,
+                    base_delay_ms=1000,
+                    context=f"Editing chunk {index + 1}",
+                )
+            except Exception as e:
+                # Last-resort fallback AFTER retries: an unedited chunk beats a
+                # dead run or dropped content.
+                logger.warning(f"Edit chunk {index + 1} failed after retries; keeping the raw chunk: {e}")
+                return chunk
 
     edited_chunks = await asyncio.gather(*[edit_chunk(c, i) for i, c in enumerate(chunks)])
     logger.info(f"Edited {len(edited_chunks)} chunks")
@@ -1046,21 +1055,22 @@ async def edit_podcast(
 
     # Process all chunks in parallel
     async def edit_chunk(chunk: str, index: int) -> str:
-        return await with_retry(
-            lambda: _edit_podcast_raw_chunk(
-                client,
-                chunk,
-                metadata,
-                config.model,
-                config.temperature,
-                thinking_budget_low,  # Raw editing uses low thinking
-                index,
-                len(chunks),
-            ),
-            max_attempts=3,
-            base_delay_ms=1000,
-            context=f"Editing chunk {index + 1}",
-        )
+        async with _gemini_sem:
+            return await with_retry(
+                lambda: _edit_podcast_raw_chunk(
+                    client,
+                    chunk,
+                    metadata,
+                    config.model,
+                    config.temperature,
+                    thinking_budget_low,  # Raw editing uses low thinking
+                    index,
+                    len(chunks),
+                ),
+                max_attempts=3,
+                base_delay_ms=1000,
+                context=f"Editing chunk {index + 1}",
+            )
 
     edit_tasks = [edit_chunk(chunk, i) for i, chunk in enumerate(chunks)]
     results = await asyncio.gather(*edit_tasks, return_exceptions=True)
@@ -1240,10 +1250,10 @@ async def _generate_podcast_metadata(
 
     if not response.text:
         raise ValueError("Empty metadata response")
-    if is_truncated(response):
-        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
 
-    # Parse JSON from response
+    # Parse JSON from response. Truncation is checked only on the failure
+    # exits: a MAX_TOKENS stop can cut trailing chatter AFTER a complete JSON
+    # block, which the patterns below still rescue.
     response_text = response.text
 
     # Pattern 1: ```json ... ```
@@ -1258,6 +1268,8 @@ async def _generate_podcast_metadata(
         json_match = re.search(r'(\{[\s\S]*\})', response_text)
 
     if not json_match:
+        if is_truncated(response):
+            raise ValueError("Metadata generation hit max output tokens and no complete JSON could be extracted")
         raise ValueError("No JSON block found in metadata output")
 
     json_str = json_match.group(1).strip()
@@ -1265,6 +1277,8 @@ async def _generate_podcast_metadata(
         return json.loads(json_str)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse metadata JSON: {e}")
+        if is_truncated(response):
+            raise ValueError(f"Metadata JSON incomplete (hit max output tokens): {e}")
         raise ValueError(f"Invalid JSON in metadata output: {e}")
 
 

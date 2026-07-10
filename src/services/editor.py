@@ -155,22 +155,38 @@ SECTION_HEADINGS = {
 }
 
 # Translation prompt for translating transcript text
-TRANSLATION_SYSTEM_PROMPT = """You are a professional translator. Add inline Chinese translations to the following transcript.
+TRANSLATION_SYSTEM_PROMPT = """You are a professional translator. You receive a JSON array of transcript paragraphs. Translate each paragraph into Simplified Chinese (简体中文).
 
-## Rules
-- First determine if the text is primarily in Chinese. If yes, return it UNCHANGED.
-- For non-Chinese text: after each paragraph, add a blockquote with the Chinese translation
-- Format:
-  Original paragraph text.
-  > 中文翻译。
-
-  Next paragraph.
-  > 下一段翻译。
-
+Return exactly one translation per input paragraph, in the same order.
+- If a paragraph is already predominantly Chinese, return "" (empty string) for it
 - Translate meaning accurately, not word-for-word
-- Keep proper nouns, technical terms, brand names unchanged
-- Output ONLY the processed text, no explanations or commentary
+- Keep proper nouns, technical terms, and brand names in their original form
+- If a paragraph starts with a speaker label like **Name:**, do not repeat the label in the translation
 """
+
+
+# The model returns only the translations; the script interleaves them under the
+# original paragraphs itself, so the original text can never be silently altered.
+def _translation_schema(paragraph_count: int) -> dict:
+    """Schema pinned to the input paragraph count, so the API's constrained
+    decoding cannot merge or drop paragraphs (the classic long-array failure)."""
+    return {
+        "type": "object",
+        "properties": {
+            "translations": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": paragraph_count,
+                "maxItems": paragraph_count,
+            },
+        },
+        "required": ["translations"],
+    }
+
+
+# Cap concurrent translation calls so a long transcript's chunk fan-out
+# does not trip API rate limits.
+MAX_CONCURRENT_TRANSLATION_CALLS = 6
 
 
 async def _generate_normal_metadata(
@@ -350,42 +366,75 @@ def _build_normal_result(
     return "\n".join(parts)
 
 
+async def _translate_chunk(
+    client: genai.Client,
+    chunk: str,
+    model: str,
+    temperature: float,
+) -> str:
+    """Translate one transcript chunk paragraph-by-paragraph and interleave the
+    translations as blockquotes. The model only ever produces translations; the
+    original paragraphs are reassembled by this function, byte-for-byte intact."""
+    paragraphs = [p for p in re.split(r'\n\n+', chunk) if p.strip()]
+    if not paragraphs:
+        return chunk
+
+    response = await _gemini_generate(
+        client, model, json.dumps(paragraphs, ensure_ascii=False),
+        system=TRANSLATION_SYSTEM_PROMPT, temperature=temperature,
+        schema=_translation_schema(len(paragraphs)), max_tokens=65536,
+    )
+    if not response.text:
+        raise ValueError("Translation returned empty result")
+    if is_truncated(response):
+        raise ValueError("Translation hit max output tokens")
+    translations = json.loads(response.text).get("translations")
+    if not isinstance(translations, list) or len(translations) != len(paragraphs):
+        got = len(translations) if isinstance(translations, list) else type(translations).__name__
+        raise ValueError(
+            f"Translation count mismatch: {len(paragraphs)} paragraphs in, {got} translations out"
+        )
+
+    out = []
+    for para, trans in zip(paragraphs, translations):
+        out.append(para)
+        t = (trans or "").strip()
+        if t:
+            out.append("\n".join("> " + line for line in t.splitlines() if line.strip()))
+    return "\n\n".join(out)
+
+
 async def _translate_transcript(
     client: genai.Client,
     transcript: str,
     model: str,
     temperature: float,
-    thinking_budget: int,
 ) -> str:
-    """Add inline Chinese translations to non-Chinese transcript.
+    """Translate transcript in chunks to avoid context/token limits.
 
-    Args:
-        client: Gemini API client
-        transcript: The transcript text to translate
-        model: Model to use
-        temperature: Temperature setting
-        thinking_budget: Thinking budget
-
-    Returns:
-        Transcript with inline translations (or unchanged if already Chinese)
-    """
+    Best-effort per chunk: a chunk whose translation keeps failing is kept
+    untranslated, so one bad chunk never discards the other chunks' work or
+    fails the run. translate_one never raises, so the gather below cannot
+    propagate and leave orphaned sibling tasks running."""
     logger.info("Adding inline translations to transcript...")
+    chunks = _split_into_chunks(transcript)
+    sem = asyncio.Semaphore(MAX_CONCURRENT_TRANSLATION_CALLS)
 
-    response = await _gemini_generate(
-        client, model, transcript,
-        system=TRANSLATION_SYSTEM_PROMPT, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=65536,
-    )
+    async def translate_one(chunk: str) -> str:
+        async with sem:
+            try:
+                return await with_retry(
+                    lambda: _translate_chunk(client, chunk, model, temperature),
+                    max_attempts=3,
+                    base_delay_ms=1000,
+                    context="Translation chunk",
+                )
+            except Exception as e:
+                logger.warning(f"Translation chunk failed after retries; keeping it untranslated: {e}")
+                return chunk
 
-    if not response.text:
-        logger.warning("Empty translation response, returning original transcript")
-        return transcript
-    # A truncated translation replaces the full transcript with a shorter one,
-    # silently dropping the tail; raise so with_retry gets a chance.
-    if is_truncated(response):
-        raise ValueError("Translation hit max output tokens; output is incomplete")
-
-    return response.text.strip()
+    translated = await asyncio.gather(*[translate_one(c) for c in chunks])
+    return "\n\n".join(translated)
 
 # Raw transcript editing prompt - corrects errors and removes fillers
 RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task is to clean up this raw transcript chunk.
@@ -462,33 +511,6 @@ Use the video information provided to help identify correct speaker names, chann
 - 不要添加任何前言或总结
 - 直接输出编辑后的转录文本
 """
-
-TRANSLATION_PROMPT_ADDITION = """
-
-## Translation Mode (ENABLED)
-Since translation mode is enabled, you must add inline Chinese translations to the Transcript section:
-
-1. **Detect language**: First determine if the transcript is primarily in Chinese
-2. **If NOT Chinese**: After each paragraph in the Transcript section, add a blockquote with the Chinese translation
-3. **If Chinese**: No translation needed, output normally
-
-### Translation Format
-For non-Chinese transcripts, format each paragraph like this:
-```
-Original paragraph text here.
-> 这里是中文翻译。
-
-Next paragraph in original language.
-> 下一段的中文翻译。
-```
-
-### Translation Requirements
-- Translate the meaning accurately, not word-for-word
-- Maintain the same paragraph structure
-- Use `> ` (blockquote) for all translations
-- Keep translations natural and readable in Chinese
-"""
-
 
 def _split_into_chunks(transcript: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
     """
@@ -703,23 +725,27 @@ async def edit(
     final_transcript = edited_transcript
 
     if enable_translation:
-        if on_status:
-            on_status("Adding inline translations...")
-        logger.info("Translation mode enabled, adding inline translations")
+        # Script-side language check: predominantly-Chinese content needs no
+        # translation pass at all (the old prompt-side check paid a full model
+        # round trip just to return the text unchanged, with rewrite risk).
+        chinese_chars = sum(1 for c in edited_transcript if '\u4e00' <= c <= '\u9fff')
+        total_alpha = sum(1 for c in edited_transcript if c.isalpha() or '\u4e00' <= c <= '\u9fff')
+        if total_alpha > 0 and chinese_chars / total_alpha > 0.5:
+            logger.info("Skipping translation: %.0f%% Chinese characters", chinese_chars / total_alpha * 100)
+        else:
+            if on_status:
+                on_status("Adding inline translations...")
+            logger.info("Translation mode enabled, adding inline translations")
 
-        final_transcript = await with_retry(
-            lambda: _translate_transcript(
+            # Best-effort per chunk inside _translate_transcript (failed chunks
+            # stay untranslated), so it never fails the run.
+            final_transcript = await _translate_transcript(
                 client,
                 edited_transcript,
                 config.translation_model,
                 config.temperature,
-                thinking_budget_low,  # Translation uses low thinking
-            ),
-            max_attempts=3,
-            base_delay_ms=1000,
-            context="Adding translations",
-        )
-        logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
+            )
+            logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
 
     # ============================================
     # Step 3: Assemble final Markdown

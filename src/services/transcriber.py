@@ -53,7 +53,11 @@ TRANSCRIPTION_PROMPT = (
     "product names, version numbers, or technical terms — even if they seem incorrect or unfamiliar."
 )
 
-# Podcast transcription prompt template (with metadata context)
+# Podcast transcription prompt template (with metadata context).
+# Speaker labels are assigned here, at the transcription stage, because this is
+# the only stage that can hear the voices. The bolded **Name:** format is a
+# contract with _SPEAKER_TOKEN_RE below: merge-time seam detection masks these
+# labels out, so the prompt and the regex must agree on the format.
 PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptionist. Transcribe the following audio accurately and verbatim.
 
 ## Media Context
@@ -67,8 +71,7 @@ PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptioni
 - If the audio is in English, output in English
 - Do not add explanations or commentary
 - Do not translate - keep the original language
-- Include speaker changes when clearly identifiable
-- Use the speaker names from the context when identifiable, otherwise use "Speaker 1:", "Speaker 2:", etc.
+- Label every speaker turn: start the turn with **Name:** when the context or audio identifies the speaker's real name, otherwise **Host:** / **Guest:** by conversational role (the host asks the questions and drives transitions), otherwise **Speaker 1:**, **Speaker 2:** in order of first appearance. Distinguish speakers by their voices and keep each person's label consistent for the whole audio
 - For unclear audio, use [inaudible] or [unclear]
 
 Output the complete transcript only."""

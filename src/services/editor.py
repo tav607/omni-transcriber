@@ -34,6 +34,44 @@ CHUNK_SIZE = 32000  # 32K characters per chunk for raw transcript editing
 CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
 MIN_MEANINGFUL_CONTENT = 50  # Minimum chars of actual text (excluding timestamps/sound effects)
 
+# Text-only Gemini calls (edit/metadata/translate). The SDK sets no request
+# timeout of its own, so without this a hung connection stalls forever (the
+# same class of hang that f14ebf4 fixed on the transcription side).
+GENERATION_TIMEOUT_SECONDS = 10 * 60
+
+
+async def _gemini_generate(
+    client: genai.Client,
+    model: str,
+    contents,
+    *,
+    system: str | None = None,
+    temperature: float = 1.0,
+    thinking_budget: int = 1024,
+    max_tokens: int | None = None,
+    schema: dict | None = None,
+    timeout: float = GENERATION_TIMEOUT_SECONDS,
+):
+    """Shared generate_content wrapper: one place for temperature, thinking,
+    schema plumbing, and a hard timeout. Post-call validation stays at the
+    call sites, where the fallback semantics differ per stage."""
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        temperature=temperature,
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        max_output_tokens=max_tokens,
+        response_mime_type="application/json" if schema else None,
+        response_schema=schema,
+    )
+
+    def _generate():
+        return client.models.generate_content(model=model, contents=contents, config=config)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_generate), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"Gemini call timed out after {int(timeout) // 60} minutes")
+
 
 @dataclass
 class VideoEditorMetadata:
@@ -193,19 +231,11 @@ async def _generate_normal_metadata(
     # Build system prompt with sections
     system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections)
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                max_output_tokens=8192,
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, user_content,
+        system=system_prompt, temperature=temperature,
+        thinking_budget=thinking_budget, max_tokens=8192,
+    )
 
     if not response.text:
         raise ValueError("Empty metadata response")
@@ -334,19 +364,11 @@ async def _translate_transcript(
     """
     logger.info("Adding inline translations to transcript...")
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=transcript,
-            config=types.GenerateContentConfig(
-                system_instruction=TRANSLATION_SYSTEM_PROMPT,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                max_output_tokens=65536,
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, transcript,
+        system=TRANSLATION_SYSTEM_PROMPT, temperature=temperature,
+        thinking_budget=thinking_budget, max_tokens=65536,
+    )
 
     if not response.text:
         logger.warning("Empty translation response, returning original transcript")
@@ -755,19 +777,11 @@ async def _edit_raw_chunk(
     # Use context-aware prompt if metadata or background provided
     system_prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if (metadata or background) else RAW_EDIT_SYSTEM_PROMPT
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                max_output_tokens=65536,  # Allow large output for long chunks
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, user_content,
+        system=system_prompt, temperature=temperature,
+        thinking_budget=thinking_budget, max_tokens=65536,
+    )
 
     # Validate response
     text = response.text
@@ -789,18 +803,11 @@ async def _generate_final_output(
     """Generate final formatted output with Title/Summary/Key Points/Transcript."""
     logger.info("Generating final formatted output...")
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, user_content,
+        system=system_prompt, temperature=temperature,
+        thinking_budget=thinking_budget,
+    )
 
     # Validate response
     text = response.text
@@ -1124,19 +1131,11 @@ async def _edit_podcast_raw_chunk(
 
     user_content = "\n".join(parts)
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=PODCAST_RAW_EDIT_SYSTEM_PROMPT,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                max_output_tokens=65536,  # Allow large output for long chunks
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, user_content,
+        system=PODCAST_RAW_EDIT_SYSTEM_PROMPT, temperature=temperature,
+        thinking_budget=thinking_budget, max_tokens=65536,
+    )
 
     # Validate response
     text = response.text
@@ -1187,19 +1186,11 @@ async def _generate_podcast_metadata(
 
     user_content = "\n".join(parts)
 
-    def _generate():
-        return client.models.generate_content(
-            model=model,
-            contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=PODCAST_METADATA_SYSTEM_PROMPT,
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                max_output_tokens=16384,
-            ),
-        )
-
-    response = await asyncio.to_thread(_generate)
+    response = await _gemini_generate(
+        client, model, user_content,
+        system=PODCAST_METADATA_SYSTEM_PROMPT, temperature=temperature,
+        thinking_budget=thinking_budget, max_tokens=16384,
+    )
 
     if not response.text:
         raise ValueError("Empty metadata response")

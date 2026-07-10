@@ -15,6 +15,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TranscriberConfig
+from ..utils.gemini import is_truncated
 from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -647,6 +648,11 @@ async def _transcribe_audio(
             if hasattr(response.prompt_feedback, "block_reason"):
                 error_msg += f" Block reason: {response.prompt_feedback.block_reason}"
         raise ValueError(error_msg)
+
+    # Warn only: a long chunk hitting the output cap is not fixable by a retry,
+    # and the partial transcript is still worth keeping.
+    if is_truncated(response):
+        logger.warning("Transcription hit max output tokens; chunk result may be truncated")
 
     return text
 

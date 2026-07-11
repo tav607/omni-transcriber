@@ -4,13 +4,35 @@ import os
 import re
 
 import markdown
-from weasyprint import HTML, CSS, default_url_fetcher
-from weasyprint.text.fonts import FontConfiguration
 
 logger = logging.getLogger(__name__)
 
-# Reuse a single FontConfiguration to avoid repeated fontconfig/Pango C-level allocations
-_font_config = FontConfiguration()
+# weasyprint pulls in Pango/cairo/fontconfig through C libraries, and a missing
+# system library surfaces as OSError at import time. Import it lazily (inside
+# _generate_pdf_sync) so a broken PDF toolchain can't crash the whole bot at
+# startup, and a PDF failure can degrade to markdown-only delivery instead. The
+# FontConfiguration singleton is built once on first use.
+_font_config = None
+
+
+def _load_weasyprint():
+    """Import weasyprint lazily and return (HTML, CSS, font_config).
+
+    Raises RuntimeError with an actionable message when the C libraries are
+    missing, which surfaces as ImportError or OSError at import time."""
+    global _font_config
+    try:
+        from weasyprint import HTML, CSS
+        from weasyprint.text.fonts import FontConfiguration
+    except (ImportError, OSError) as e:
+        raise RuntimeError(
+            "weasyprint failed to load; PDF generation needs system libraries. "
+            "Ubuntu: sudo apt install libpango-1.0-0 libpangocairo-1.0-0 "
+            "libgdk-pixbuf2.0-0"
+        ) from e
+    if _font_config is None:
+        _font_config = FontConfiguration()
+    return HTML, CSS, _font_config
 
 
 # Pattern to strip HTML tags that could be injected
@@ -47,7 +69,9 @@ def _safe_url_fetcher(url: str, timeout: int = 10, ssl_context=None):
     Blocks file://, http://, https://, and any other schemes.
     """
     if url.startswith("data:"):
-        # Allow data URIs (inline content)
+        # Allow data URIs (inline content). weasyprint is already imported by
+        # the time this fetcher runs (from _generate_pdf_sync), so this is cached.
+        from weasyprint import default_url_fetcher
         return default_url_fetcher(url, timeout, ssl_context)
 
     # Block all other URLs to prevent SSRF and local file access
@@ -275,7 +299,8 @@ async def generate_pdf(markdown_content: str, output_path: str) -> str:
 
 def _generate_pdf_sync(html_content: str, output_path: str) -> None:
     """Generate PDF synchronously (for thread pool execution)."""
+    HTML, CSS, font_config = _load_weasyprint()
     # Use custom url_fetcher to block all external resources (SSRF prevention)
     html = HTML(string=html_content, url_fetcher=_safe_url_fetcher)
-    css = CSS(string=DEFAULT_CSS, font_config=_font_config)
-    html.write_pdf(output_path, stylesheets=[css], font_config=_font_config)
+    css = CSS(string=DEFAULT_CSS, font_config=font_config)
+    html.write_pdf(output_path, stylesheets=[css], font_config=font_config)

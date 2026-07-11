@@ -338,10 +338,16 @@ async def process_audio_file(
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(edited_transcript)
 
-        # Generate PDF
+        # Generate PDF (degrade to Markdown-only if the PDF toolchain fails; the
+        # Markdown uploaded to Dropbox below is the watcher's primary deliverable)
         pdf_path = os.path.join(temp_dir, f"{output_filename}.pdf")
-        await generate_pdf(edited_transcript, pdf_path)
-        logger.info(f"Generated output files: {output_filename}")
+        pdf_generated = True
+        try:
+            await generate_pdf(edited_transcript, pdf_path)
+            logger.info(f"Generated output files: {output_filename}")
+        except Exception as e:
+            pdf_generated = False
+            logger.error(f"PDF generation failed, delivering Markdown only: {e}")
 
         # Step 5: Upload results to Dropbox output folder
         # Track whether we have at least one output destination
@@ -370,11 +376,16 @@ async def process_audio_file(
         if watcher_config.telegram_chat_id:
             try:
                 await update_status(f"📤 Sending files...\n<code>{escaped_path}</code>")
-                pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+                if pdf_generated:
+                    doc_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+                    caption = f"✅ Transcription complete:\n{escaped_path}"
+                else:
+                    doc_file = FSInputFile(md_path, filename=f"{output_filename}.md")
+                    caption = f"⚠️ Transcription complete (PDF failed, sent Markdown):\n{escaped_path}"
                 await bot.send_document(
                     chat_id=watcher_config.telegram_chat_id,
-                    document=pdf_file,
-                    caption=f"✅ Transcription complete:\n{escaped_path}",
+                    document=doc_file,
+                    caption=caption,
                     parse_mode="HTML",
                 )
                 # Delete status message after sending the document

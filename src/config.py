@@ -333,3 +333,7 @@ def setup_logging():
     )
     # Suppress verbose fontTools logs during PDF font subsetting
     logging.getLogger("fontTools").setLevel(logging.WARNING)
+    # google-genai and httpx emit one INFO line per API call (AFC notice, HTTP
+    # request), which drowns out the pipeline's own progress logs.
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)

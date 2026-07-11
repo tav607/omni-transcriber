@@ -15,7 +15,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TranscriberConfig
-from ..utils.gemini import is_truncated
+from ..utils.gemini import is_truncated, _gemini_sem
 from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -472,8 +472,15 @@ async def transcribe(
 
         async def upload_chunk(chunk_path: Path) -> types.File:
             chunk_mime = MIME_TYPES.get(chunk_path.suffix.lower(), mime_type)
+
+            # Acquire the gate inside the retried attempt but around the call, so
+            # the queue wait sits outside _upload_file's own wait_for budget.
+            async def _attempt():
+                async with _gemini_sem:
+                    return await _upload_file(client, str(chunk_path), chunk_mime)
+
             return await with_retry(
-                lambda: _upload_file(client, str(chunk_path), chunk_mime),
+                _attempt,
                 max_attempts=3,
                 base_delay_ms=1000,
                 context=f"File upload {chunk_path.name}",
@@ -491,15 +498,21 @@ async def transcribe(
                 on_status("Transcribing...")
 
         async def transcribe_chunk(uploaded_file: types.File) -> str:
+            # Gate around the call, outside _transcribe_audio's own wait_for, so
+            # queue time doesn't burn the per-chunk timeout budget.
+            async def _attempt():
+                async with _gemini_sem:
+                    return await _transcribe_audio(
+                        client,
+                        uploaded_file,
+                        config.model,
+                        config.temperature,
+                        thinking_budget,
+                        metadata,
+                    )
+
             return await with_retry(
-                lambda: _transcribe_audio(
-                    client,
-                    uploaded_file,
-                    config.model,
-                    config.temperature,
-                    thinking_budget,
-                    metadata,
-                ),
+                _attempt,
                 max_attempts=3,
                 base_delay_ms=1000,
                 context="Transcription",

@@ -1,9 +1,13 @@
 import asyncio
 import logging
+import random
 from typing import TypeVar, Callable, Awaitable
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+# Cap the exponential backoff so a late attempt doesn't sleep for minutes.
+MAX_RETRY_DELAY_MS = 60_000
 
 
 async def with_retry(
@@ -11,37 +15,48 @@ async def with_retry(
     max_attempts: int = 3,
     base_delay_ms: int = 1000,
     context: str = "Operation",
+    non_retryable_exceptions: tuple[type[BaseException], ...] = (),
 ) -> T:
     """
-    Retry an async function with exponential backoff.
+    Retry an async function with exponential backoff and jitter.
 
     Args:
         fn: The async function to retry
         max_attempts: Maximum number of attempts (default: 3)
         base_delay_ms: Base delay in milliseconds (default: 1000)
         context: Context string for log messages (default: 'Operation')
+        non_retryable_exceptions: Exception types that should propagate
+            immediately without retrying (e.g. a content-policy block)
 
     Returns:
         The result of the function
 
     Raises:
-        Exception: The last error if all attempts fail
+        The original exception from the last attempt if all attempts fail, or
+        immediately if a non-retryable exception is raised.
     """
-    last_error: Exception | None = None
+    last_error: BaseException | None = None
 
     for attempt in range(1, max_attempts + 1):
         try:
             return await fn()
+        except non_retryable_exceptions:
+            # Caller marked this class as not worth retrying; keep its type.
+            raise
         except Exception as error:
             last_error = error
             if attempt < max_attempts:
-                delay = base_delay_ms * (2 ** (attempt - 1))
+                # Exponential backoff, capped, with 0.5-1.5x jitter so a batch of
+                # rate-limited calls doesn't retry in lockstep (thundering herd).
+                delay = min(base_delay_ms * (2 ** (attempt - 1)), MAX_RETRY_DELAY_MS)
+                delay *= 0.5 + random.random()
                 logger.warning(
                     f"{context} failed (attempt {attempt}/{max_attempts}): {error}. "
-                    f"Retrying in {delay}ms..."
+                    f"Retrying in {int(delay)}ms..."
                 )
                 await asyncio.sleep(delay / 1000)
 
-    raise Exception(
-        f"{context} failed after {max_attempts} attempts: {last_error}"
-    ) from last_error
+    # Re-raise the original exception so callers can branch on its type, rather
+    # than a bare Exception that would erase it.
+    assert last_error is not None
+    raise last_error

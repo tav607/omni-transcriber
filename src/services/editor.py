@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 from ..config import EditorConfig
-from ..utils.gemini import is_truncated
+from ..utils.gemini import is_truncated, _gemini_sem
 from ..utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -182,17 +182,6 @@ def _translation_schema(paragraph_count: int) -> dict:
         },
         "required": ["translations"],
     }
-
-
-# Cap total in-flight editor Gemini calls, shared across edit, podcast-edit,
-# and translation fan-outs (bot and watcher jobs share one event loop, so a
-# per-run cap would still stack). Also keeps the 10-minute wait_for budget
-# honest: without a gate, chunks queue in the default thread pool with their
-# timeout clock already running.
-MAX_CONCURRENT_GEMINI_CALLS = 6
-# Safe at module scope on Python 3.10+: binds to the loop on first await, and
-# the app runs a single asyncio.run loop.
-_gemini_sem = asyncio.Semaphore(MAX_CONCURRENT_GEMINI_CALLS)
 
 
 async def _generate_normal_metadata(

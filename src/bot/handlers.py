@@ -631,9 +631,14 @@ async def _process_video_url(
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(edited_transcript)
 
-        # Generate PDF
+        # Generate PDF (degrade to Markdown-only if the PDF toolchain fails)
         pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
-        await generate_pdf(edited_transcript, pdf_path)
+        pdf_generated = True
+        try:
+            await generate_pdf(edited_transcript, pdf_path)
+        except Exception as e:
+            pdf_generated = False
+            logger.error(f"PDF generation failed, delivering Markdown only: {e}")
 
         # Upload to rclone if enabled for this user
         rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
@@ -641,14 +646,16 @@ async def _process_video_url(
         # Send files
         await status_message.edit_text("📤 Sending files...")
 
-        pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
-
-        # Only send .md if rclone upload was not successful
-        if not rclone_uploaded:
+        # Send the Markdown if rclone didn't take it, or as the only output when the PDF failed
+        if not rclone_uploaded or not pdf_generated:
             md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
             await message.answer_document(md_file, caption="Markdown transcript")
 
-        await message.answer_document(pdf_file, caption="PDF transcript")
+        if pdf_generated:
+            pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+            await message.answer_document(pdf_file, caption="PDF transcript")
+        else:
+            await message.answer("⚠️ PDF generation failed; sent Markdown only.")
 
         if rclone_uploaded:
             await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")
@@ -774,9 +781,14 @@ async def _process_apple_podcast(
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(edited_result.markdown)
 
-    # Generate PDF
+    # Generate PDF (degrade to Markdown-only if the PDF toolchain fails)
     pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
-    await generate_pdf(edited_result.markdown, pdf_path)
+    pdf_generated = True
+    try:
+        await generate_pdf(edited_result.markdown, pdf_path)
+    except Exception as e:
+        pdf_generated = False
+        logger.error(f"PDF generation failed, delivering Markdown only: {e}")
 
     # Upload to rclone if enabled for this user
     rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
@@ -784,14 +796,16 @@ async def _process_apple_podcast(
     # Send files
     await status_message.edit_text("📤 Sending files...")
 
-    pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
-
-    # Only send .md if rclone upload was not successful
-    if not rclone_uploaded:
+    # Send the Markdown if rclone didn't take it, or as the only output when the PDF failed
+    if not rclone_uploaded or not pdf_generated:
         md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
         await message.answer_document(md_file, caption="Markdown transcript")
 
-    await message.answer_document(pdf_file, caption="PDF transcript")
+    if pdf_generated:
+        pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+        await message.answer_document(pdf_file, caption="PDF transcript")
+    else:
+        await message.answer("⚠️ PDF generation failed; sent Markdown only.")
 
     # Show completion message (unified with other sources)
     if rclone_uploaded:
@@ -903,9 +917,14 @@ async def _process_xiaoyuzhou_podcast(
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(edited_result.markdown)
 
-    # Generate PDF
+    # Generate PDF (degrade to Markdown-only if the PDF toolchain fails)
     pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
-    await generate_pdf(edited_result.markdown, pdf_path)
+    pdf_generated = True
+    try:
+        await generate_pdf(edited_result.markdown, pdf_path)
+    except Exception as e:
+        pdf_generated = False
+        logger.error(f"PDF generation failed, delivering Markdown only: {e}")
 
     # Upload to rclone if enabled for this user
     rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
@@ -913,14 +932,16 @@ async def _process_xiaoyuzhou_podcast(
     # Send files
     await status_message.edit_text("📤 Sending files...")
 
-    pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
-
-    # Only send .md if rclone upload was not successful
-    if not rclone_uploaded:
+    # Send the Markdown if rclone didn't take it, or as the only output when the PDF failed
+    if not rclone_uploaded or not pdf_generated:
         md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
         await message.answer_document(md_file, caption="Markdown transcript")
 
-    await message.answer_document(pdf_file, caption="PDF transcript")
+    if pdf_generated:
+        pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+        await message.answer_document(pdf_file, caption="PDF transcript")
+    else:
+        await message.answer("⚠️ PDF generation failed; sent Markdown only.")
 
     # Show completion message (unified with other sources)
     if rclone_uploaded:
@@ -1077,9 +1098,14 @@ async def _process_audio_file(
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(edited_transcript)
 
-        # Generate PDF
+        # Generate PDF (degrade to Markdown-only if the PDF toolchain fails)
         pdf_path = os.path.join(request_temp_dir, "transcript.pdf")
-        await generate_pdf(edited_transcript, pdf_path)
+        pdf_generated = True
+        try:
+            await generate_pdf(edited_transcript, pdf_path)
+        except Exception as e:
+            pdf_generated = False
+            logger.error(f"PDF generation failed, delivering Markdown only: {e}")
 
         # Upload to rclone if enabled for this user
         rclone_uploaded = await upload_to_rclone(md_path, f"{output_filename}.md", chat_id)
@@ -1087,14 +1113,16 @@ async def _process_audio_file(
         # Send files
         await status_message.edit_text("📤 Sending files...")
 
-        pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
-
-        # Only send .md if rclone upload was not successful
-        if not rclone_uploaded:
+        # Send the Markdown if rclone didn't take it, or as the only output when the PDF failed
+        if not rclone_uploaded or not pdf_generated:
             md_file = FSInputFile(md_path, filename=f"{output_filename}.md")
             await message.answer_document(md_file, caption="Markdown transcript")
 
-        await message.answer_document(pdf_file, caption="PDF transcript")
+        if pdf_generated:
+            pdf_file = FSInputFile(pdf_path, filename=f"{output_filename}.pdf")
+            await message.answer_document(pdf_file, caption="PDF transcript")
+        else:
+            await message.answer("⚠️ PDF generation failed; sent Markdown only.")
 
         if rclone_uploaded:
             await status_message.edit_text("✅ Done! Your transcript is ready. (Markdown synced to Dropbox)")

@@ -169,9 +169,9 @@ def _get_audio_duration(audio_path: Path) -> int:
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",
-        str(audio_path),
+        "--", str(audio_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr}")
     duration_seconds = float(result.stdout.strip())
@@ -222,10 +222,10 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
             "-t", str(chunk_duration_ms / 1000),  # Duration in seconds
             "-c", "copy",  # Stream copy, no re-encoding
             "-avoid_negative_ts", "1",
-            str(chunk_path),
+            "--", str(chunk_path),
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg split failed: {result.stderr}")
 

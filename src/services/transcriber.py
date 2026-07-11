@@ -385,18 +385,25 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
 
     for i in range(1, len(transcripts)):
         current = transcripts[i]
-        skip = _find_overlap_length(merged, current)
-        if skip > MAX_OVERLAP_SKIP:
+        raw_skip = _find_overlap_length(merged, current)
+        if raw_skip > MAX_OVERLAP_SKIP:
             logger.warning(
-                f"Overlap skip {skip} exceeds safety limit {MAX_OVERLAP_SKIP} "
+                f"Overlap skip {raw_skip} exceeds safety limit {MAX_OVERLAP_SKIP} "
                 f"at chunk {i}, ignoring to prevent data loss"
             )
             skip = 0
+        else:
+            skip = raw_skip
         if skip > 0:
             current = current[skip:].lstrip()
             logger.info(f"Removed {skip} chars of overlapping content at chunk {i}")
-        else:
-            logger.debug(f"No overlap detected at chunk {i}, concatenating")
+        elif raw_skip == 0:
+            # A capped skip (raw_skip > limit) is a different, already-warned case;
+            # only a genuine miss means the ~OVERLAP_SECONDS overlap survived.
+            logger.warning(
+                f"No overlap detected at chunk seam {i}; "
+                f"~{OVERLAP_SECONDS}s of audio may be duplicated there"
+            )
         merged = merged + "\n\n" + current
 
     return merged

@@ -184,27 +184,43 @@ def _translation_schema(paragraph_count: int) -> dict:
     }
 
 
-# Section definition line, e.g.  - "key_points": array of strings - description
-_SECTION_FIELD_RE = re.compile(r'^\s*-\s*"([^"]+)"\s*:\s*([^-\n]+)', re.MULTILINE)
+# A section-definition line as DEFAULT_SECTIONS writes them, matched per stripped
+# line:  - "field_name": type - description
+_SECTION_FIELD_RE = re.compile(r'^-\s*"([^"]+)"\s*:\s*(.+)$')
+# Any line that looks like it is trying to define an output field: a bullet or
+# numbered list item, or a quoted-name-and-colon shape. Used to catch field
+# lines the strict pattern can't parse (e.g. '*' bullets, unquoted names,
+# full-width colons) so the schema bails rather than silently dropping them.
+_CANDIDATE_FIELD_RE = re.compile(r'^(?:[-*+•]|\d+[.)])\s|^"[^"]+"\s*[:：]')
 
 
 def _build_metadata_schema(sections: str) -> dict | None:
     """Best-effort response_schema from the section definitions.
 
-    Returns None when the sections don't parse cleanly into string /
-    array-of-string fields (e.g. a CONTEXT.md that asks for object arrays), so
-    the caller keeps the multi-strategy regex extraction for anything the schema
-    can't safely represent. The downstream _build_normal_result renders both
-    strings and string lists, which is what this covers."""
+    All-or-nothing: returns None (so the caller keeps the multi-strategy regex
+    extraction) unless EVERY field-definition line parses cleanly into a string
+    or array-of-string field. Silently dropping a field the user asked for is
+    worse than the regex path, because constrained decoding would then never
+    emit it. The downstream _build_normal_result renders strings and string
+    lists, which is what this covers."""
     properties: dict[str, dict] = {}
-    for name, typedesc in _SECTION_FIELD_RE.findall(sections):
-        t = typedesc.strip().lower()
-        if "array" in t or "list" in t:
-            if any(tok in t for tok in ("object", "dict", "pair")):
+    for raw_line in sections.splitlines():
+        line = raw_line.strip()
+        if not _CANDIDATE_FIELD_RE.match(line):
+            continue  # prose, blank line, heading, or the "these fields:" preamble
+        m = _SECTION_FIELD_RE.match(line)
+        if not m:
+            # A field-shaped line the strict pattern can't parse.
+            return None
+        name = m.group(1)
+        # The type token is whatever precedes the ' - description' separator.
+        type_part = m.group(2).split(" - ", 1)[0].strip().lower()
+        if "array" in type_part or "list" in type_part:
+            if any(tok in type_part for tok in ("object", "dict", "pair")):
                 # Object arrays (e.g. Q&A) are too shape-specific to infer here.
                 return None
             properties[name] = {"type": "array", "items": {"type": "string"}}
-        elif "string" in t or "text" in t:
+        elif "string" in type_part or "text" in type_part:
             properties[name] = {"type": "string"}
         else:
             # Unknown type token: don't risk constraining the output wrongly.
@@ -369,6 +385,10 @@ async def _generate_normal_metadata(
     # custom CONTEXT.md sections that don't (e.g. object arrays) return None and
     # keep the multi-strategy regex path below.
     schema = _build_metadata_schema(sections)
+    logger.info(
+        "Metadata generation using %s",
+        "response_schema" if schema else "regex extraction",
+    )
 
     # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
     # must hold the thinking budget (8192 on this path) PLUS the JSON itself.

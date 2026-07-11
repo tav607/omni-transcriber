@@ -637,7 +637,23 @@ async def transcribe(
         transcribe_tasks = [
             transcribe_chunk(f, d) for f, d in zip(uploaded_files, chunk_durations_s)
         ]
-        transcripts = await asyncio.gather(*transcribe_tasks)
+        # Settle every chunk before raising: a bare gather propagates the first
+        # failure while sibling transcriptions are still in flight, and the
+        # finally block would then delete their uploaded files out from under
+        # them (each orphan burns its retries against a now-deleted file while
+        # holding a shared Gemini slot). return_exceptions=True lets them all
+        # finish first; a cancellation propagates, otherwise the first real
+        # error is raised (one chunk failing still fails the whole run).
+        results = await asyncio.gather(*transcribe_tasks, return_exceptions=True)
+        cancelled = next(
+            (r for r in results if isinstance(r, asyncio.CancelledError)), None
+        )
+        if cancelled is not None:
+            raise cancelled
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
+        transcripts = list(results)
         logger.info(f"Transcribed {len(transcripts)} chunks")
 
         # Step 3: Clean up each transcript

@@ -26,8 +26,12 @@ EMOJI_PATTERN = re.compile(
     "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
     "\U0001FA00-\U0001FA6F"  # Chess Symbols
     "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+    "\U0001F700-\U0001F77F"  # Alchemical Symbols
+    "\U0001F780-\U0001F7FF"  # Geometric Shapes Extended (includes 🟠🟢🟥)
+    "\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
     "\U00002702-\U000027B0"  # Dingbats
     "\U00002600-\U000026FF"  # Misc symbols (includes ✨)
+    "\U000024C2-\U000024FF"  # Enclosed Alphanumerics (includes Ⓜ)
     "\U0000FE00-\U0000FE0F"  # Variation Selectors
     "\U0000200D"             # Zero Width Joiner
     "]+",

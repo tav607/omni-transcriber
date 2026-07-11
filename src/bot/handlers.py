@@ -578,6 +578,7 @@ async def _process_video_url(
             transcriber_config,
             metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
+            podcast_mode=False,  # single-track video: gentle speaker labeling
         )
 
         # Convert VideoMetadata to VideoEditorMetadata for editor
@@ -736,6 +737,7 @@ async def _process_apple_podcast(
         transcriber_config,
         metadata=transcription_metadata,
         on_status=lambda s: logger.info(s),
+        podcast_mode=True,  # podcast: strong speaker labeling
     )
 
     # Step 4: Edit with podcast mode (structured output)
@@ -879,6 +881,7 @@ async def _process_xiaoyuzhou_podcast(
         transcriber_config,
         metadata=transcription_metadata,
         on_status=lambda s: logger.info(s),
+        podcast_mode=True,  # podcast: strong speaker labeling
     )
 
     # Step 5: Edit with podcast mode (structured output)
@@ -1064,6 +1067,7 @@ async def _process_audio_file(
             transcriber_config,
             metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
+            podcast_mode=True,  # uploaded audio: strong speaker labeling
         )
 
         # Edit/format

@@ -44,6 +44,12 @@ TRANSCRIPTION_TIMEOUT_SECONDS = 15 * 60
 # Timeout for file upload (5 minutes, should be enough for ~100MB files)
 UPLOAD_TIMEOUT_SECONDS = 5 * 60
 
+# Degenerate-output floor: far below real speech density (Chinese ~3-5,
+# English ~12-15 chars/sec), so only content-free responses trip it.
+MIN_TRANSCRIPT_CHARS_PER_SEC = 0.5
+# Retries for a suspiciously-short chunk transcript before accepting it.
+TRANSCRIPTION_SHORT_RETRIES = 3
+
 # Default transcription prompt (for non-podcast sources)
 TRANSCRIPTION_PROMPT = (
     "Transcribe this audio verbatim. If the language is Chinese, please use Simplified "
@@ -206,7 +212,7 @@ def _get_audio_duration(audio_path: Path) -> int:
     return int(duration_seconds * 1000)
 
 
-def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
+def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], List[int], int]:
     """
     Split audio file into chunks using ffmpeg with stream copy (no re-encoding).
 
@@ -215,14 +221,16 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
         output_dir: Directory to save audio chunks
 
     Returns:
-        Tuple of (list of paths to audio chunks, duration in milliseconds).
-        If audio is shorter than threshold, returns ([original_path], duration).
+        Tuple of (chunk paths, per-chunk durations in ms, total duration in ms).
+        Per-chunk durations come from the split arithmetic, so no extra ffprobe
+        call is needed. If the audio is shorter than the threshold, returns
+        ([original_path], [duration], duration).
     """
     # Get duration first
     duration_ms = _get_audio_duration(audio_path)
 
     if duration_ms <= MAX_DURATION_MS:
-        return [audio_path], duration_ms
+        return [audio_path], [duration_ms], duration_ms
 
     # Defensive check
     if OVERLAP_MS >= MAX_DURATION_MS:
@@ -231,6 +239,7 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
         )
 
     chunks = []
+    durations: List[int] = []
     chunk_index = 0
     start_ms = 0
     ext = audio_path.suffix
@@ -258,6 +267,7 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
             raise RuntimeError(f"ffmpeg split failed: {result.stderr}")
 
         chunks.append(chunk_path)
+        durations.append(chunk_duration_ms)
         chunk_index += 1
 
         # If this chunk reached the end, we're done
@@ -268,7 +278,7 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], int]:
         start_ms = end_ms - OVERLAP_MS
 
     logger.info(f"Split audio into {len(chunks)} chunks of ~{MAX_DURATION_MINUTES} minutes each")
-    return chunks, duration_ms
+    return chunks, durations, duration_ms
 
 
 # Overlap detection constants
@@ -479,7 +489,8 @@ async def transcribe(
     try:
         # Split audio if needed (uses ffmpeg, very fast)
         temp_dir = Path(tempfile.mkdtemp(prefix="omni_chunks_"))
-        chunk_paths, duration_ms = _split_audio(audio_path_obj, temp_dir)
+        chunk_paths, chunk_durations_ms, duration_ms = _split_audio(audio_path_obj, temp_dir)
+        chunk_durations_s = [d / 1000 for d in chunk_durations_ms]
         duration_minutes = duration_ms // 60000
         needs_splitting = len(chunk_paths) > 1
 
@@ -536,7 +547,7 @@ async def transcribe(
             else:
                 on_status("Transcribing...")
 
-        async def transcribe_chunk(uploaded_file: types.File) -> str:
+        async def transcribe_chunk(uploaded_file: types.File, duration_s: float) -> str:
             # Gate around the call, outside _transcribe_audio's own wait_for, so
             # queue time doesn't burn the per-chunk timeout budget.
             async def _attempt():
@@ -551,14 +562,40 @@ async def transcribe(
                         podcast_mode,
                     )
 
-            return await with_retry(
-                _attempt,
-                max_attempts=3,
-                base_delay_ms=1000,
-                context="Transcription",
+            # Degenerate-output guard: a chunk that transcribes to almost nothing
+            # (e.g. just a speaker's name) is retried. Measured on the cleaned
+            # length so a repetitive-character loop can't inflate past the floor.
+            # with_retry handles empty responses (it raises and retries); this
+            # outer loop handles the non-empty-but-degenerate case, and accepts
+            # the last short result so legitimately sparse audio (music, long
+            # silence) doesn't fail the whole run.
+            min_chars = max(10, int(duration_s * MIN_TRANSCRIPT_CHARS_PER_SEC))
+            text = ""
+            for attempt in range(1, TRANSCRIPTION_SHORT_RETRIES + 1):
+                text = await with_retry(
+                    _attempt,
+                    max_attempts=3,
+                    base_delay_ms=1000,
+                    context="Transcription",
+                )
+                cleaned_len = len(cleanup_repetitive_characters(text).strip())
+                if duration_s <= 0 or cleaned_len >= min_chars:
+                    return text
+                if attempt < TRANSCRIPTION_SHORT_RETRIES:
+                    logger.warning(
+                        f"Transcript suspiciously short ({cleaned_len} chars for "
+                        f"{duration_s:.0f}s of audio, expected >= {min_chars}); "
+                        f"retrying ({attempt}/{TRANSCRIPTION_SHORT_RETRIES})"
+                    )
+            logger.warning(
+                f"Transcript still short after {TRANSCRIPTION_SHORT_RETRIES} attempts; "
+                "accepting it (audio may be legitimately sparse)"
             )
+            return text
 
-        transcribe_tasks = [transcribe_chunk(f) for f in uploaded_files]
+        transcribe_tasks = [
+            transcribe_chunk(f, d) for f, d in zip(uploaded_files, chunk_durations_s)
+        ]
         transcripts = await asyncio.gather(*transcribe_tasks)
         logger.info(f"Transcribed {len(transcripts)} chunks")
 

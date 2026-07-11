@@ -238,6 +238,72 @@ PODCAST_METADATA_SCHEMA = {
 }
 
 
+# Extracts a shared spelling list so independently-edited chunks agree on proper
+# nouns. The anti-miscorrection instruction is load-bearing: without it the
+# glossary itself would "correct" an unusual-but-consistent name into a famous
+# lookalike and propagate that into every chunk.
+GLOSSARY_PROMPT = """From this transcript, extract the proper nouns that a transcript editor must spell consistently: people, companies, organizations, products, technologies, place names.
+
+Return the canonical spelling of each term as it should appear. Only normalize a spelling when it varies between occurrences, or when it is an obviously garbled form of a term established by the metadata or context. If the transcript uses an unusual term consistently, keep it exactly as the transcript spells it; do NOT "correct" an unfamiliar name into a more famous lookalike. At most 40 terms; only terms that actually appear in the transcript. Return an empty list if there are none."""
+
+GLOSSARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "terms": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["terms"],
+}
+
+
+async def _extract_glossary(client: genai.Client, transcript: str, model: str) -> List[str]:
+    """Extract a proper-noun glossary from the raw transcript (first 300k chars),
+    so that independently-edited chunks spell the same names the same way."""
+    response = await _gemini_generate(
+        client, model, transcript[:300000],
+        system=GLOSSARY_PROMPT, schema=GLOSSARY_SCHEMA, max_tokens=4096,
+    )
+    if not response.text:
+        return []
+    terms = json.loads(response.text).get("terms", [])
+    return [t.strip() for t in terms if isinstance(t, str) and t.strip()][:40]
+
+
+async def _maybe_extract_glossary(
+    client: genai.Client,
+    transcript: str,
+    chunk_count: int,
+    model: str,
+    on_status: Callable[[str], None] | None = None,
+) -> List[str]:
+    """Extract a cross-chunk glossary, but only when there is more than one edit
+    chunk (a single chunk is already internally consistent). Best-effort: returns
+    [] so editing proceeds if extraction fails."""
+    if chunk_count <= 1:
+        return []
+    if on_status:
+        on_status("Extracting terminology for cross-chunk consistency...")
+
+    # Gate the extra call through the shared Gemini semaphore, inside the retried
+    # attempt so the gate isn't held during backoff.
+    async def _attempt():
+        async with _gemini_sem:
+            return await _extract_glossary(client, transcript, model)
+
+    try:
+        glossary = await with_retry(
+            _attempt, max_attempts=2, base_delay_ms=1000, context="Glossary extraction",
+        )
+    except Exception as e:
+        logger.warning(f"Glossary extraction failed; editing without it: {e}")
+        return []
+
+    if glossary:
+        shown = ", ".join(glossary[:10])
+        more = ", ..." if len(glossary) > 10 else ""
+        logger.info(f"Glossary: {len(glossary)} term(s): {shown}{more}")
+    return glossary
+
+
 async def _generate_normal_metadata(
     client: genai.Client,
     transcript: str,
@@ -718,6 +784,12 @@ async def edit(
         else:
             on_status("Editing transcript...")
 
+    # A glossary extracted from the whole transcript keeps proper-noun spellings
+    # consistent across the independently-edited chunks.
+    glossary = await _maybe_extract_glossary(
+        client, transcript, len(chunks), config.translation_model, on_status
+    )
+
     # Process all chunks in parallel (bounded by the shared semaphore)
     async def edit_chunk(chunk: str, index: int) -> str:
         async with _gemini_sem:
@@ -733,6 +805,7 @@ async def edit(
                         len(chunks),
                         metadata,
                         background,
+                        glossary,
                     ),
                     max_attempts=3,
                     base_delay_ms=1000,
@@ -833,6 +906,7 @@ async def _edit_raw_chunk(
     total_chunks: int,
     metadata: Optional[VideoEditorMetadata] = None,
     background: str = "",
+    glossary: Optional[List[str]] = None,
 ) -> str:
     """Edit a raw transcript chunk (fix errors, remove fillers)."""
     logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks}...")
@@ -851,6 +925,11 @@ async def _edit_raw_chunk(
     elif background:
         parts.append("## Background Information (用于推断正确的说话人名字和专有名词)")
         parts.append(background)
+        parts.append("")
+
+    if glossary:
+        parts.append("## Terminology (use these exact spellings consistently)")
+        parts.append(", ".join(glossary))
         parts.append("")
 
     parts.append(f"## Raw Transcript Chunk ({chunk_index + 1}/{total_chunks})")
@@ -1106,6 +1185,12 @@ async def edit_podcast(
         else:
             on_status("Editing transcript...")
 
+    # A glossary extracted from the whole transcript keeps proper-noun spellings
+    # consistent across the independently-edited chunks.
+    glossary = await _maybe_extract_glossary(
+        client, transcript, len(chunks), config.translation_model, on_status
+    )
+
     # Process all chunks in parallel
     async def edit_chunk(chunk: str, index: int) -> str:
         async with _gemini_sem:
@@ -1119,6 +1204,7 @@ async def edit_podcast(
                     thinking_budget_low,  # Raw editing uses low thinking
                     index,
                     len(chunks),
+                    glossary,
                 ),
                 max_attempts=3,
                 base_delay_ms=1000,
@@ -1193,6 +1279,7 @@ async def _edit_podcast_raw_chunk(
     thinking_budget: int,
     chunk_index: int,
     total_chunks: int,
+    glossary: Optional[List[str]] = None,
 ) -> str:
     """Edit a raw transcript chunk with podcast context (fix errors, remove fillers, format speakers)."""
     # Pre-validation: skip chunks without meaningful content
@@ -1219,6 +1306,11 @@ async def _edit_podcast_raw_chunk(
             if len(metadata.shownotes) > 2000:
                 shownotes_truncated += "..."
             parts.append(f"- Episode Description: {shownotes_truncated}")
+        parts.append("")
+
+    if glossary:
+        parts.append("## Terminology (use these exact spellings consistently)")
+        parts.append(", ".join(glossary))
         parts.append("")
 
     parts.append(f"## Raw Transcript Chunk ({chunk_index + 1}/{total_chunks})")

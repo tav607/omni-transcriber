@@ -566,11 +566,22 @@ async def transcribe(
         # successes so cleanup can reach them, then raise.
         upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
         upload_errors = []
+        cancelled = None
         for i, result in enumerate(upload_results):
-            if isinstance(result, Exception):
+            # Classify by BaseException, not Exception: a CancelledError is a
+            # BaseException and must not slip through as a "successful" upload
+            # (it would be appended and then blow up in the finally cleanup).
+            # Record every real upload first so cleanup can reach it, then
+            # re-raise a cancellation as-is rather than folding it into the
+            # error summary.
+            if isinstance(result, asyncio.CancelledError):
+                cancelled = result
+            elif isinstance(result, BaseException):
                 upload_errors.append(f"Chunk {i}: {result}")
             else:
                 uploaded_files.append(result)
+        if cancelled is not None:
+            raise cancelled
         if upload_errors:
             logger.error(
                 f"Upload failed for {len(upload_errors)} chunks, cleaning up "

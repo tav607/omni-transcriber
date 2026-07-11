@@ -1,10 +1,31 @@
 import asyncio
 import logging
 import os
+import shutil
 
 from .config import config, setup_logging
 from .bot.bot import run_bot
 from .watcher import run_dropbox_watcher
+
+
+def check_external_dependencies() -> None:
+    """Check that required external tools are installed.
+
+    Raises:
+        RuntimeError: If required dependencies are missing.
+    """
+    missing = []
+
+    if not shutil.which("ffprobe"):
+        missing.append("ffprobe")
+    if not shutil.which("ffmpeg"):
+        missing.append("ffmpeg")
+
+    if missing:
+        raise RuntimeError(
+            f"Required external dependencies not found: {', '.join(missing)}. "
+            "Install ffmpeg (which includes ffprobe), e.g. `apt install ffmpeg`."
+        )
 
 
 async def main_async():
@@ -33,6 +54,11 @@ def main():
     # Setup logging
     setup_logging()
     logger = logging.getLogger(__name__)
+
+    # Fail fast if ffmpeg/ffprobe are missing: as a long-running service this
+    # surfaces the deployment problem at startup instead of letting every
+    # transcription task hit a raw subprocess traceback mid-run.
+    check_external_dependencies()
 
     # Ensure temp directory exists
     os.makedirs(config.temp_dir, exist_ok=True)

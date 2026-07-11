@@ -216,18 +216,31 @@ async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:
         target_entry = None
 
         if target_episode_id:
-            # Apple's iTunes episode ID often isn't in the feed's guid/id (e.g.
-            # Ximalaya-hosted feeds use their own ID space), so fall back to
-            # matching the URL slug against entry titles.
+            # Match the episode ID with word-boundary awareness so a short ID
+            # can't false-positive inside a longer numeric GUID, and search the
+            # entry's id/guid, link, and enclosure URLs. Apple's iTunes episode
+            # ID often isn't in the feed at all (e.g. Ximalaya-hosted feeds use
+            # their own ID space), so also fall back to matching the URL slug
+            # against entry titles.
+            ep_pattern = re.compile(
+                rf'(?:^|[^0-9]){re.escape(target_episode_id)}(?:$|[^0-9])'
+            )
             slug_match_enabled = bool(target_slug_norm) and len(target_slug_norm) >= 6
-            id_match = exact = contains = None
+            id_match = enclosure_match = exact = contains = None
 
             for entry in feed.entries:
-                if id_match is None and any(
-                    target_episode_id in str(entry.get(k, "")) for k in ("id", "guid")
-                ):
-                    id_match = entry
-                    break
+                if id_match is None:
+                    entry_id = str(entry.get("id", "") or entry.get("guid", ""))
+                    entry_link = entry.get("link", "")
+                    if ep_pattern.search(entry_id) or ep_pattern.search(entry_link):
+                        id_match = entry
+                        break
+                if enclosure_match is None:
+                    for enc in entry.get("enclosures", []):
+                        enc_url = enc.get("href", "") or enc.get("url", "")
+                        if ep_pattern.search(enc_url):
+                            enclosure_match = entry
+                            break
                 if slug_match_enabled and exact is None:
                     n = _normalize_title(entry.get("title", ""))
                     if not n:
@@ -237,7 +250,7 @@ async def get_episode_metadata(apple_url: str) -> Optional[EpisodeMetadata]:
                     elif contains is None and target_slug_norm in n:
                         contains = entry
 
-            target_entry = id_match or exact or contains
+            target_entry = id_match or enclosure_match or exact or contains
 
             if target_entry is None:
                 logger.error(

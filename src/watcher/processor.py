@@ -304,6 +304,7 @@ async def process_audio_file(
             config.transcriber,
             metadata=transcription_metadata,
             on_status=lambda s: logger.info(f"Transcribe: {s}"),
+            podcast_mode=True,  # watcher audio files: strong speaker labeling
         )
         logger.info(f"Transcription complete, length: {len(raw_transcript)}")
 

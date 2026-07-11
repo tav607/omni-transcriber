@@ -71,10 +71,25 @@ PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptioni
 - If the audio is in English, output in English
 - Do not add explanations or commentary
 - Do not translate - keep the original language
-- Label every speaker turn: start the turn with **Name:** when the context or audio identifies the speaker's real name, otherwise **Host:** / **Guest:** by conversational role (the host asks the questions and drives transitions), otherwise **Speaker 1:**, **Speaker 2:** in order of first appearance. Distinguish speakers by their voices and keep each person's label consistent for the whole audio
+{speaker_guideline}
 - For unclear audio, use [inaudible] or [unclear]
 
 Output the complete transcript only."""
+
+# Strong speaker labeling for conversational audio (podcasts, meetings, uploaded
+# recordings). The bolded **Name:** format pairs with _SPEAKER_TOKEN_RE at merge
+# time, so seam detection can mask the labels out.
+PODCAST_SPEAKER_GUIDELINE = (
+    "- Label every speaker turn: start the turn with **Name:** when the context or "
+    "audio identifies the speaker's real name, otherwise **Host:** / **Guest:** by "
+    "conversational role (the host asks the questions and drives transitions), "
+    "otherwise **Speaker 1:**, **Speaker 2:** in order of first appearance. "
+    "Distinguish speakers by their voices and keep each person's label consistent "
+    "for the whole audio"
+)
+# Gentle labeling for single-track video (YouTube etc.), where forcing role or
+# numbered labels onto a single-presenter talk adds noise.
+GENERIC_SPEAKER_GUIDELINE = "- Include speaker changes when clearly identifiable"
 
 
 @dataclass
@@ -104,23 +119,36 @@ class TranscriptionMetadata:
         return self.description
 
 
-def _build_transcription_prompt(metadata: Optional[TranscriptionMetadata]) -> str:
-    """Build transcription prompt with optional metadata context."""
-    if metadata is None:
+def _build_transcription_prompt(
+    metadata: Optional[TranscriptionMetadata],
+    podcast_mode: bool = False,
+) -> str:
+    """Build the transcription prompt.
+
+    podcast_mode selects the speaker-labeling guideline (strong role/name labels
+    vs. gentle) by content form, independently of whether metadata is present:
+    audio with no metadata still gets speaker labels, while a plain video does
+    not get the forced role/numbered labels.
+    """
+    if metadata is None and not podcast_mode:
         return TRANSCRIPTION_PROMPT
 
     # Build metadata section
-    metadata_lines = [
-        f"- Source: {metadata.source_name}",
-        f"- Title: {metadata.title}",
-    ]
-    if metadata.publish_date:
-        metadata_lines.append(f"- Date: {metadata.publish_date}")
-    if metadata.description:
-        metadata_lines.append(f"- Description: {metadata.description}")
+    metadata_lines = []
+    if metadata is not None:
+        metadata_lines.append(f"- Source: {metadata.source_name}")
+        metadata_lines.append(f"- Title: {metadata.title}")
+        if metadata.publish_date:
+            metadata_lines.append(f"- Date: {metadata.publish_date}")
+        if metadata.description:
+            metadata_lines.append(f"- Description: {metadata.description}")
+    if not metadata_lines:
+        metadata_lines.append("- (no metadata available)")
 
-    metadata_section = "\n".join(metadata_lines)
-    return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(metadata_section=metadata_section)
+    return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(
+        metadata_section="\n".join(metadata_lines),
+        speaker_guideline=PODCAST_SPEAKER_GUIDELINE if podcast_mode else GENERIC_SPEAKER_GUIDELINE,
+    )
 
 # MIME type mapping
 MIME_TYPES = {
@@ -414,6 +442,7 @@ async def transcribe(
     config: TranscriberConfig,
     metadata: Optional[TranscriptionMetadata] = None,
     on_status: Callable[[str], None] | None = None,
+    podcast_mode: bool = False,
 ) -> str:
     """
     Transcribe audio file using Gemini API.
@@ -424,6 +453,9 @@ async def transcribe(
         config: Transcriber configuration
         metadata: Optional metadata for podcast mode (provides context for better transcription)
         on_status: Optional callback to report status updates
+        podcast_mode: Content form of the source. True for conversational audio
+            (podcasts, meetings, uploaded recordings), which gets strong speaker
+            labels even without metadata; False for single-track video.
 
     Returns:
         The transcribed text
@@ -516,6 +548,7 @@ async def transcribe(
                         config.temperature,
                         thinking_budget,
                         metadata,
+                        podcast_mode,
                     )
 
             return await with_retry(
@@ -624,12 +657,13 @@ async def _transcribe_audio(
     temperature: float,
     thinking_budget: int,
     metadata: Optional[TranscriptionMetadata] = None,
+    podcast_mode: bool = False,
 ) -> str:
     """Transcribe audio using Gemini model."""
     logger.info(f"Processing transcription for {uploaded_file.name}...")
 
     # Build prompt with or without metadata context
-    prompt = _build_transcription_prompt(metadata)
+    prompt = _build_transcription_prompt(metadata, podcast_mode)
 
     def _generate():
         return client.models.generate_content(

@@ -21,12 +21,15 @@ _client_cache: dict[str, genai.Client] = {}
 
 
 def _get_client(api_key: str) -> genai.Client:
-    """Get or create a shared genai.Client for the given API key."""
+    """Get or create a shared genai.Client for the given API key.
+
+    base_url is left unset so the google-genai SDK's own GOOGLE_GEMINI_BASE_URL
+    environment variable takes effect (its default matches the official
+    endpoint, so behaviour is unchanged unless that variable is set to route
+    Gemini through a relay/proxy).
+    """
     if api_key not in _client_cache:
-        _client_cache[api_key] = genai.Client(
-            api_key=api_key,
-            http_options={"base_url": "https://generativelanguage.googleapis.com"},
-        )
+        _client_cache[api_key] = genai.Client(api_key=api_key)
     return _client_cache[api_key]
 
 

@@ -83,6 +83,7 @@ Edit `.env` with your credentials:
 | `EDITOR_TEMPERATURE` | `1.0` | Editor temperature |
 | `TRANSCRIBER_THINKING_LEVEL` | `low` | Thinking level: `low` or `high` |
 | `EDITOR_THINKING_LEVEL` | `high` | Thinking level: `low` or `high` |
+| `GOOGLE_GEMINI_BASE_URL` | *(official endpoint)* | Route Gemini through a relay/proxy (read by the google-genai SDK) |
 | `TEMP_DIR` | `/tmp/omni_transcriber` | Temporary file directory |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `RSSHUB_BASE_URL` | *(empty)* | RSSHub instance URL (required for Xiaoyuzhou) |

@@ -555,7 +555,27 @@ async def transcribe(
             )
 
         upload_tasks = [upload_chunk(p) for p in chunk_paths]
-        uploaded_files = await asyncio.gather(*upload_tasks)
+        # Settle every upload before proceeding: a bare gather propagates the
+        # first failure while sibling uploads are still in flight, so any that
+        # land afterward would never be recorded in uploaded_files and the
+        # finally block could not delete them (they leak on Gemini until the 48h
+        # auto-expiry, counting against the storage quota). Collect the
+        # successes so cleanup can reach them, then raise.
+        upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        upload_errors = []
+        for i, result in enumerate(upload_results):
+            if isinstance(result, Exception):
+                upload_errors.append(f"Chunk {i}: {result}")
+            else:
+                uploaded_files.append(result)
+        if upload_errors:
+            logger.error(
+                f"Upload failed for {len(upload_errors)} chunks, cleaning up "
+                f"{len(uploaded_files)} successful uploads"
+            )
+            raise RuntimeError(
+                f"Failed to upload audio chunks: {'; '.join(upload_errors)}"
+            )
         logger.info(f"Uploaded {len(uploaded_files)} files")
 
         # Step 2: Transcribe all chunks in parallel

@@ -17,7 +17,7 @@ from ..config import config
 from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_xiaoyuzhou_url, is_supported_url, get_url_platform, extract_video_id, extract_xiaoyuzhou_episode_id
 from ..utils import settings_store
 from ..services.downloader import download_audio, download_audio_from_url, DownloadResult, VideoMetadata
-from ..services.transcriber import transcribe, TranscriptionMetadata
+from ..services.transcriber import transcribe, TranscriptionMetadata, is_podcast_video
 from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata, VideoEditorMetadata
 from ..services.rss_parser import get_episode_metadata, extract_episode_id
 from ..services.xiaoyuzhou_parser import get_episode_metadata as get_xiaoyuzhou_metadata
@@ -571,6 +571,15 @@ async def _process_video_url(
                 description=video_metadata.description,
             )
 
+        # A video whose metadata reads like a podcast (interview, panel, 访谈, ...)
+        # gets podcast-mode speaker labeling; a plain single-track video stays generic.
+        video_podcast_mode = bool(
+            video_metadata
+            and is_podcast_video(
+                video_metadata.title, video_metadata.channel, video_metadata.description
+            )
+        )
+
         # Transcribe
         await status_message.edit_text("🎙 Transcribing audio...")
         raw_transcript = await transcribe(
@@ -578,7 +587,7 @@ async def _process_video_url(
             transcriber_config,
             metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
-            podcast_mode=False,  # single-track video: gentle speaker labeling
+            podcast_mode=video_podcast_mode,
         )
 
         # Convert VideoMetadata to VideoEditorMetadata for editor

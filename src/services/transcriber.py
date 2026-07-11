@@ -125,6 +125,24 @@ class TranscriptionMetadata:
         return self.description
 
 
+# A YouTube/Bilibili video whose metadata reads like a podcast (interview,
+# panel, 访谈, ...) should transcribe in podcast mode so it gets the strong
+# speaker labeling. Keyword set copied verbatim from the transcribe skill's
+# _is_podcast heuristic.
+_PODCAST_VIDEO_KEYWORDS = re.compile(
+    r"podcast|播客|访谈|对谈|圆桌|panel|interview|conversation|talk\s*show|episode\s*\d",
+    re.IGNORECASE,
+)
+
+
+def is_podcast_video(title: str, channel: str = "", description: str = "") -> bool:
+    """True if a video's title/channel/description reads like a podcast, so the
+    transcription should use podcast-mode speaker labeling instead of the gentle
+    single-track guideline."""
+    haystack = f"{title or ''} {channel or ''} {(description or '')[:500]}"
+    return bool(_PODCAST_VIDEO_KEYWORDS.search(haystack))
+
+
 def _build_transcription_prompt(
     metadata: Optional[TranscriptionMetadata],
     podcast_mode: bool = False,

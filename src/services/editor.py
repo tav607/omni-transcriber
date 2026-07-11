@@ -184,6 +184,60 @@ def _translation_schema(paragraph_count: int) -> dict:
     }
 
 
+# Section definition line, e.g.  - "key_points": array of strings - description
+_SECTION_FIELD_RE = re.compile(r'^\s*-\s*"([^"]+)"\s*:\s*([^-\n]+)', re.MULTILINE)
+
+
+def _build_metadata_schema(sections: str) -> dict | None:
+    """Best-effort response_schema from the section definitions.
+
+    Returns None when the sections don't parse cleanly into string /
+    array-of-string fields (e.g. a CONTEXT.md that asks for object arrays), so
+    the caller keeps the multi-strategy regex extraction for anything the schema
+    can't safely represent. The downstream _build_normal_result renders both
+    strings and string lists, which is what this covers."""
+    properties: dict[str, dict] = {}
+    for name, typedesc in _SECTION_FIELD_RE.findall(sections):
+        t = typedesc.strip().lower()
+        if "array" in t or "list" in t:
+            if any(tok in t for tok in ("object", "dict", "pair")):
+                # Object arrays (e.g. Q&A) are too shape-specific to infer here.
+                return None
+            properties[name] = {"type": "array", "items": {"type": "string"}}
+        elif "string" in t or "text" in t:
+            properties[name] = {"type": "string"}
+        else:
+            # Unknown type token: don't risk constraining the output wrongly.
+            return None
+    if not properties:
+        return None
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties.keys()),
+    }
+
+
+# Podcast metadata has a fixed shape, so it always uses this schema.
+PODCAST_METADATA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "takeaways": {"type": "array", "items": {"type": "string"}},
+        "qa_pairs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}, "a": {"type": "string"}},
+                "required": ["q", "a"],
+            },
+        },
+        "highlights": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "takeaways", "qa_pairs", "highlights"],
+}
+
+
 async def _generate_normal_metadata(
     client: genai.Client,
     transcript: str,
@@ -245,24 +299,34 @@ async def _generate_normal_metadata(
     # Build system prompt with sections
     system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections)
 
+    # Constrain output with a response_schema when the sections parse cleanly;
+    # custom CONTEXT.md sections that don't (e.g. object arrays) return None and
+    # keep the multi-strategy regex path below.
+    schema = _build_metadata_schema(sections)
+
     # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
     # must hold the thinking budget (8192 on this path) PLUS the JSON itself.
     response = await _gemini_generate(
         client, model, user_content,
         system=system_prompt, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=16384,
+        thinking_budget=thinking_budget, max_tokens=16384, schema=schema,
     )
 
     if not response.text:
         raise ValueError("Empty metadata response")
 
-    # Parse JSON from response. Truncation is checked only after all extraction
-    # strategies fail: a MAX_TOKENS stop can cut trailing chatter AFTER a
+    # With a schema, constrained decoding guarantees valid JSON, so a MAX_TOKENS
+    # truncation (the only failure mode) leaves incomplete JSON: check it before
+    # parsing. Without a schema, truncation is checked only after all extraction
+    # strategies fail, because a MAX_TOKENS stop can cut trailing chatter AFTER a
     # complete JSON object, which Strategy 2-4 still rescue (a JSON truncated
     # mid-object can never balance its braces, so no strategy accepts it).
+    if schema is not None and is_truncated(response):
+        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
+
     response_text = response.text.strip()
 
-    # Strategy 1: Try parsing entire response directly (ideal case - LLM followed instructions)
+    # Strategy 1: Try parsing entire response directly (the schema path lands here)
     try:
         return json.loads(response_text)
     except json.JSONDecodeError:
@@ -1234,40 +1298,40 @@ async def _generate_podcast_metadata(
     response = await _gemini_generate(
         client, model, user_content,
         system=PODCAST_METADATA_SYSTEM_PROMPT, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=24576,
+        thinking_budget=thinking_budget, max_tokens=24576, schema=PODCAST_METADATA_SCHEMA,
     )
 
     if not response.text:
         raise ValueError("Empty metadata response")
 
-    # Parse JSON from response. Truncation is checked only on the failure
-    # exits: a MAX_TOKENS stop can cut trailing chatter AFTER a complete JSON
-    # block, which the patterns below still rescue.
+    # With response_schema, constrained decoding guarantees valid JSON, so a
+    # MAX_TOKENS truncation is the one failure mode and leaves incomplete JSON:
+    # check it before parsing.
+    if is_truncated(response):
+        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
+
+    # Primary path: the schema-constrained output parses directly.
+    try:
+        return json.loads(response.text)
+    except json.JSONDecodeError:
+        pass
+
+    # Defensive fallback (should not trigger under response_schema): the batch-1
+    # multi-pattern extraction, kept in case the output ever comes back
+    # markdown-wrapped.
     response_text = response.text
-
-    # Pattern 1: ```json ... ```
     json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-
-    # Pattern 2: ``` ... ```
     if not json_match:
         json_match = re.search(r'```\s*([\{\[].*?[\}\]])\s*```', response_text, re.DOTALL)
-
-    # Pattern 3: Raw JSON object
     if not json_match:
         json_match = re.search(r'(\{[\s\S]*\})', response_text)
-
     if not json_match:
-        if is_truncated(response):
-            raise ValueError("Metadata generation hit max output tokens and no complete JSON could be extracted")
         raise ValueError("No JSON block found in metadata output")
 
     json_str = json_match.group(1).strip()
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse metadata JSON: {e}")
-        if is_truncated(response):
-            raise ValueError(f"Metadata JSON incomplete (hit max output tokens): {e}")
         raise ValueError(f"Invalid JSON in metadata output: {e}")
 
 

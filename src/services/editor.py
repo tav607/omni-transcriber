@@ -517,6 +517,15 @@ def _build_normal_result(
     return "\n".join(parts)
 
 
+def _is_predominantly_chinese(text: str) -> bool:
+    """True if the text is already mostly Chinese, so an inline-translation pass
+    would only waste a model round trip (and risk rewriting the original). Counts
+    CJK ideographs against all alphabetic + CJK characters."""
+    chinese_chars = sum(1 for c in text if '一' <= c <= '鿿')
+    total_alpha = sum(1 for c in text if c.isalpha() or '一' <= c <= '鿿')
+    return total_alpha > 0 and chinese_chars / total_alpha > 0.5
+
+
 async def _translate_chunk(
     client: genai.Client,
     chunk: str,
@@ -849,61 +858,60 @@ async def edit(
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
     # ============================================
-    # Step 2: Generate metadata JSON
+    # Step 2: Generate metadata + (optional) translate, in parallel
     # ============================================
-    if on_status:
-        on_status("Generating summary and key points...")
-
-    # Use section definitions from override or default
+    # Both steps consume only edited_transcript, so they run concurrently. The
+    # translation is best-effort per chunk (never raises), so it cannot cancel
+    # the metadata sibling task; a metadata failure still fails the run, as before.
     sections = sections_override or DEFAULT_SECTIONS
 
-    # Generate metadata (title, summary, key_points, etc.)
-    metadata_dict = await with_retry(
-        lambda: _generate_normal_metadata(
-            client,
-            edited_transcript,
-            sections,
-            config.model,
-            config.temperature,
-            thinking_budget_high,  # Metadata generation uses high thinking
-            metadata,
-            background,
-        ),
-        max_attempts=3,
-        base_delay_ms=1000,
-        context="Generating metadata",
-    )
+    async def _run_metadata() -> dict:
+        return await with_retry(
+            lambda: _generate_normal_metadata(
+                client,
+                edited_transcript,
+                sections,
+                config.model,
+                config.temperature,
+                thinking_budget_high,  # Metadata generation uses high thinking
+                metadata,
+                background,
+            ),
+            max_attempts=3,
+            base_delay_ms=1000,
+            context="Generating metadata",
+        )
+
+    # Script-side language check: predominantly-Chinese content needs no
+    # translation pass at all (the old prompt-side check paid a full model round
+    # trip just to return the text unchanged, with rewrite risk).
+    need_translation = enable_translation and not _is_predominantly_chinese(edited_transcript)
+    if enable_translation and not need_translation:
+        logger.info("Skipping translation: content is predominantly Chinese")
+
+    final_transcript = edited_transcript
+    if need_translation:
+        if on_status:
+            on_status("Generating summary and key points + inline translations...")
+        # Best-effort per chunk inside _translate_transcript (failed chunks stay
+        # untranslated), so it never raises and cannot cancel the metadata task.
+        async with asyncio.TaskGroup() as tg:
+            meta_task = tg.create_task(_run_metadata())
+            trans_task = tg.create_task(
+                _translate_transcript(
+                    client, edited_transcript, config.translation_model, config.temperature
+                )
+            )
+        metadata_dict = meta_task.result()
+        final_transcript = trans_task.result()
+        logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
+    else:
+        if on_status:
+            on_status("Generating summary and key points...")
+        metadata_dict = await _run_metadata()
 
     logger.info(f"Generated metadata: title='{metadata_dict.get('title', 'N/A')}', "
                 f"{len(metadata_dict.get('key_points', []))} key points")
-
-    # ============================================
-    # Step 2b (optional): Add inline translations
-    # ============================================
-    final_transcript = edited_transcript
-
-    if enable_translation:
-        # Script-side language check: predominantly-Chinese content needs no
-        # translation pass at all (the old prompt-side check paid a full model
-        # round trip just to return the text unchanged, with rewrite risk).
-        chinese_chars = sum(1 for c in edited_transcript if '\u4e00' <= c <= '\u9fff')
-        total_alpha = sum(1 for c in edited_transcript if c.isalpha() or '\u4e00' <= c <= '\u9fff')
-        if total_alpha > 0 and chinese_chars / total_alpha > 0.5:
-            logger.info("Skipping translation: %.0f%% Chinese characters", chinese_chars / total_alpha * 100)
-        else:
-            if on_status:
-                on_status("Adding inline translations...")
-            logger.info("Translation mode enabled, adding inline translations")
-
-            # Best-effort per chunk inside _translate_transcript (failed chunks
-            # stay untranslated), so it never fails the run.
-            final_transcript = await _translate_transcript(
-                client,
-                edited_transcript,
-                config.translation_model,
-                config.temperature,
-            )
-            logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
 
     # ============================================
     # Step 3: Assemble final Markdown

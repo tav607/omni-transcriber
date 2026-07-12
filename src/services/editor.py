@@ -895,13 +895,21 @@ async def edit(
             on_status("Generating summary and key points + inline translations...")
         # Best-effort per chunk inside _translate_transcript (failed chunks stay
         # untranslated), so it never raises and cannot cancel the metadata task.
-        async with asyncio.TaskGroup() as tg:
-            meta_task = tg.create_task(_run_metadata())
-            trans_task = tg.create_task(
-                _translate_transcript(
-                    client, edited_transcript, config.translation_model, config.temperature
+        try:
+            async with asyncio.TaskGroup() as tg:
+                meta_task = tg.create_task(_run_metadata())
+                trans_task = tg.create_task(
+                    _translate_transcript(
+                        client, edited_transcript, config.translation_model, config.temperature
+                    )
                 )
-            )
+        except ExceptionGroup as eg:
+            # Translation never raises, so a single-leaf group is the metadata
+            # failure; unwrap it so callers see the original error (and its
+            # message) instead of an opaque "unhandled errors in a TaskGroup".
+            if len(eg.exceptions) == 1:
+                raise eg.exceptions[0]
+            raise
         metadata_dict = meta_task.result()
         final_transcript = trans_task.result()
         logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
@@ -1295,13 +1303,21 @@ async def edit_podcast(
     if need_translation:
         if on_status:
             on_status("Generating metadata + inline translations...")
-        async with asyncio.TaskGroup() as tg:
-            meta_task = tg.create_task(_run_metadata())
-            trans_task = tg.create_task(
-                _translate_transcript(
-                    client, edited_transcript, config.translation_model, config.temperature
+        # Translation is best-effort (never raises), so it cannot cancel the
+        # metadata task; a single-leaf ExceptionGroup is the metadata failure,
+        # unwrapped below so callers see the original error message.
+        try:
+            async with asyncio.TaskGroup() as tg:
+                meta_task = tg.create_task(_run_metadata())
+                trans_task = tg.create_task(
+                    _translate_transcript(
+                        client, edited_transcript, config.translation_model, config.temperature
+                    )
                 )
-            )
+        except ExceptionGroup as eg:
+            if len(eg.exceptions) == 1:
+                raise eg.exceptions[0]
+            raise
         metadata_dict = meta_task.result()
         final_transcript = trans_task.result()
         logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")

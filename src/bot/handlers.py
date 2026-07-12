@@ -530,6 +530,7 @@ async def _process_video_url(
                 editor_config=editor_config,
                 request_temp_dir=request_temp_dir,
                 chat_id=chat_id,
+                enable_translation=enable_translation,
             )
             return
 
@@ -545,6 +546,7 @@ async def _process_video_url(
                 editor_config=editor_config,
                 request_temp_dir=request_temp_dir,
                 chat_id=chat_id,
+                enable_translation=enable_translation,
             )
             return
 
@@ -688,6 +690,7 @@ async def _process_apple_podcast(
     editor_config,
     request_temp_dir: str,
     chat_id: int,
+    enable_translation: bool = False,
 ) -> None:
     """
     Process an Apple Podcast URL using specialized podcast mode.
@@ -767,6 +770,7 @@ async def _process_apple_podcast(
         raw_transcript,
         editor_config,
         metadata=editor_metadata,
+        enable_translation=enable_translation,
         on_status=lambda s: logger.info(s),
     )
     del raw_transcript  # Free memory early
@@ -833,6 +837,7 @@ async def _process_xiaoyuzhou_podcast(
     editor_config,
     request_temp_dir: str,
     chat_id: int,
+    enable_translation: bool = False,
 ) -> None:
     """
     Process a Xiaoyuzhou podcast URL using specialized podcast mode via RSSHub.
@@ -908,6 +913,7 @@ async def _process_xiaoyuzhou_podcast(
         raw_transcript,
         editor_config,
         metadata=editor_metadata,
+        enable_translation=enable_translation,
         on_status=lambda s: logger.info(s),
     )
     del raw_transcript  # Free memory early

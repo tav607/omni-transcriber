@@ -1165,6 +1165,7 @@ async def edit_podcast(
     transcript: str,
     config: EditorConfig,
     metadata: Optional[PodcastEpisodeMetadata] = None,
+    enable_translation: bool = False,
     on_status: Callable[[str], None] | None = None,
 ) -> PodcastEditedTranscript:
     """
@@ -1179,6 +1180,9 @@ async def edit_podcast(
         transcript: The raw transcript text to edit
         config: Editor configuration
         metadata: Episode metadata (podcast name, title, link, date, shownotes)
+        enable_translation: If True, add inline Chinese translations to the
+            transcript for non-Chinese content (same behaviour as the generic
+            editor; predominantly-Chinese transcripts skip the pass)
         on_status: Optional callback to report status updates
 
     Returns:
@@ -1262,25 +1266,49 @@ async def edit_podcast(
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
     # ============================================
-    # Step 2: Generate metadata from EDITED transcript
+    # Step 2: Generate metadata + (optional) translate, in parallel
     # ============================================
-    if on_status:
-        on_status("Generating metadata (summary, takeaways, Q&A, highlights)...")
-
+    # Both steps consume only edited_transcript. Translation is best-effort per
+    # chunk (never raises), so it cannot cancel the metadata sibling task.
     logger.info("Generating metadata from edited transcript...")
-    metadata_dict = await with_retry(
-        lambda: _generate_podcast_metadata(
-            client,
-            edited_transcript,
-            metadata,
-            config.model,
-            config.temperature,
-            thinking_budget_high,  # Metadata generation uses high thinking
-        ),
-        max_attempts=3,
-        base_delay_ms=1000,
-        context="Generating metadata",
-    )
+
+    async def _run_metadata() -> dict:
+        return await with_retry(
+            lambda: _generate_podcast_metadata(
+                client,
+                edited_transcript,
+                metadata,
+                config.model,
+                config.temperature,
+                thinking_budget_high,  # Metadata generation uses high thinking
+            ),
+            max_attempts=3,
+            base_delay_ms=1000,
+            context="Generating metadata",
+        )
+
+    need_translation = enable_translation and not _is_predominantly_chinese(edited_transcript)
+    if enable_translation and not need_translation:
+        logger.info("Skipping translation: content is predominantly Chinese")
+
+    final_transcript = edited_transcript
+    if need_translation:
+        if on_status:
+            on_status("Generating metadata + inline translations...")
+        async with asyncio.TaskGroup() as tg:
+            meta_task = tg.create_task(_run_metadata())
+            trans_task = tg.create_task(
+                _translate_transcript(
+                    client, edited_transcript, config.translation_model, config.temperature
+                )
+            )
+        metadata_dict = meta_task.result()
+        final_transcript = trans_task.result()
+        logger.info(f"Translated transcript: {len(edited_transcript)} -> {len(final_transcript)} chars")
+    else:
+        if on_status:
+            on_status("Generating metadata (summary, takeaways, Q&A, highlights)...")
+        metadata_dict = await _run_metadata()
 
     logger.info(f"Generated metadata: {len(metadata_dict.get('takeaways', []))} takeaways, "
                f"{len(metadata_dict.get('qa_pairs', []))} Q&A, "
@@ -1289,7 +1317,7 @@ async def edit_podcast(
     # ============================================
     # Step 3: Build final result
     # ============================================
-    result = _build_podcast_result(metadata_dict, edited_transcript, metadata)
+    result = _build_podcast_result(metadata_dict, final_transcript, metadata)
 
     if on_status:
         on_status("Editing complete")

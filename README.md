@@ -8,15 +8,18 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 - Transcribe uploaded audio files (mp3, m4a, mp4, wav, webm, ogg, flac)
 - Support large audio files up to 2GB via Local Bot API Server
 - Generate formatted transcripts with summary and key points
+- Auto-detect podcast/interview videos and format them with takeaways, Q&A, and
+  highlights (override per message with `#podcast` / `#nopodcast`)
 - Output as both Markdown and PDF files
 - Chinese summary with original language transcript preservation
 - User settings via Telegram commands:
   - `/model` - Choose AI model (Flash/Pro) for transcription and editing
   - `/translation` - Toggle inline Chinese translation for non-Chinese content
+    (applies to podcasts and videos alike)
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - ffmpeg (for audio extraction)
 - System libraries for WeasyPrint (PDF generation)
 
@@ -114,6 +117,12 @@ To restrict bot access, you need your Telegram Chat ID:
 - **Apple Podcasts**: Send an Apple Podcasts URL (podcasts.apple.com)
 - **Xiaoyuzhou**: Send a Xiaoyuzhou URL (xiaoyuzhoufm.com) - requires RSSHub
 - **Audio file**: Send an audio file directly
+
+Apple Podcasts and Xiaoyuzhou always use podcast mode. YouTube/Bilibili videos
+are auto-classified: interview / talk-show / panel content is formatted as a
+podcast (Info, Summary, Takeaways, Q&A, Highlights), everything else gets the
+generic title/summary/key-points format. Add `#podcast` or `#nopodcast` in the
+same message as the link to force the choice.
 
 The bot will reply with:
 - A Markdown file containing the formatted transcript

@@ -57,6 +57,34 @@ AUDIO_MIME_TYPES = [
 # Pattern to extract h1 title from markdown
 H1_TITLE_PATTERN = re.compile(r"^#\s+(.+?)$", re.MULTILINE)
 
+# Manual podcast-mode override tokens. Matched as whole whitespace-delimited
+# tokens so they can never collide with the URL itself (URLs contain no spaces).
+_PODCAST_FLAG_ON = {"podcast", "#podcast", "/podcast"}
+_PODCAST_FLAG_OFF = {"nopodcast", "#nopodcast", "no-podcast", "#no-podcast"}
+
+
+def parse_podcast_override(text: str) -> tuple[str, bool | None]:
+    """Split a message into its URL and an optional podcast-mode override.
+
+    A flag token (e.g. ``#podcast`` / ``#nopodcast``) sent in the same message
+    as the URL forces podcast mode on or off, taking precedence over the
+    is_podcast_video heuristic. Returns ``(cleaned_text, override)`` where
+    override is True to force podcast mode, False to force generic mode, or None
+    when no flag is present. Flags are matched case-insensitively and stripped
+    from the returned text.
+    """
+    override: bool | None = None
+    kept: list[str] = []
+    for token in text.split():
+        low = token.lower()
+        if low in _PODCAST_FLAG_ON:
+            override = True
+        elif low in _PODCAST_FLAG_OFF:
+            override = False
+        else:
+            kept.append(token)
+    return " ".join(kept), override
+
 
 def extract_title_from_transcript(transcript: str) -> str | None:
     """
@@ -181,6 +209,10 @@ async def cmd_help(message: Message):
         "*Settings:*\n"
         "`/model` - Choose AI model (Flash/Pro)\n"
         "`/translation` - Toggle inline Chinese translation\n\n"
+        "*Podcast mode:*\n"
+        "Interview / talk-show videos are auto-detected and formatted with "
+        "takeaways, Q&A, and highlights. Add `#podcast` or `#nopodcast` to a "
+        "link to force it on or off.\n\n"
         "*Output:*\n"
         "You'll receive:\n"
         "- A Markdown file with the formatted transcript\n"
@@ -420,11 +452,15 @@ async def handle_text(message: Message):
     if not text:
         return
 
+    # A #podcast / #nopodcast flag in the message forces the edit mode; strip it
+    # so the remaining text is a clean URL for platform detection and download.
+    url, podcast_override = parse_podcast_override(text)
+
     # Check if it's a supported video URL
-    platform = get_url_platform(text)
+    platform = get_url_platform(url)
 
     if platform == "youtube":
-        video_id = extract_video_id(text)
+        video_id = extract_video_id(url)
         logger.info(f"Received YouTube URL, video_id: {video_id}")
         status_message = await message.answer(
             f"🔗 Detected YouTube video. Processing...\nVideo ID: `{video_id}`",
@@ -432,46 +468,46 @@ async def handle_text(message: Message):
         )
 
         try:
-            await _process_video_url(message, text, status_message, platform)
+            await _process_video_url(message, url, status_message, platform, podcast_override)
         except Exception as e:
             logger.error(f"Error processing YouTube URL: {e}", exc_info=True)
             await status_message.edit_text(f"Error processing YouTube video: {str(e)}")
 
     elif platform == "bilibili":
-        logger.info(f"Received Bilibili URL: {text}")
+        logger.info(f"Received Bilibili URL: {url}")
         status_message = await message.answer(
             "🔗 Detected Bilibili video. Processing...",
             parse_mode="Markdown",
         )
 
         try:
-            await _process_video_url(message, text, status_message, platform)
+            await _process_video_url(message, url, status_message, platform, podcast_override)
         except Exception as e:
             logger.error(f"Error processing Bilibili URL: {e}", exc_info=True)
             await status_message.edit_text(f"Error processing Bilibili video: {str(e)}")
 
     elif platform == "apple_podcasts":
-        logger.info(f"Received Apple Podcasts URL: {text}")
+        logger.info(f"Received Apple Podcasts URL: {url}")
         status_message = await message.answer(
             "🎧 Detected Apple Podcasts. Processing...",
             parse_mode="Markdown",
         )
 
         try:
-            await _process_video_url(message, text, status_message, platform)
+            await _process_video_url(message, url, status_message, platform, podcast_override)
         except Exception as e:
             logger.error(f"Error processing Apple Podcasts URL: {e}", exc_info=True)
             await status_message.edit_text(f"Error processing podcast: {str(e)}")
 
     elif platform == "xiaoyuzhou":
-        logger.info(f"Received Xiaoyuzhou URL: {text}")
+        logger.info(f"Received Xiaoyuzhou URL: {url}")
         status_message = await message.answer(
             "🎧 Detected Xiaoyuzhou podcast. Processing...",
             parse_mode="Markdown",
         )
 
         try:
-            await _process_video_url(message, text, status_message, platform)
+            await _process_video_url(message, url, status_message, platform, podcast_override)
         except Exception as e:
             logger.error(f"Error processing Xiaoyuzhou URL: {e}", exc_info=True)
             await status_message.edit_text(f"Error processing podcast: {str(e)}")
@@ -485,9 +521,17 @@ async def handle_text(message: Message):
 
 
 async def _process_video_url(
-    message: Message, url: str, status_message: Message, platform: str
+    message: Message,
+    url: str,
+    status_message: Message,
+    platform: str,
+    podcast_override: bool | None = None,
 ) -> None:
-    """Process a video URL (YouTube/Bilibili/Apple Podcasts) and send the transcript."""
+    """Process a video URL (YouTube/Bilibili/Apple Podcasts) and send the transcript.
+
+    podcast_override, when not None, forces podcast mode on/off for the
+    YouTube/Bilibili path, overriding the is_podcast_video heuristic.
+    """
     # Get user settings
     chat_id = message.chat.id
     enable_translation = settings_store.get(chat_id, "translation", False)
@@ -574,12 +618,19 @@ async def _process_video_url(
             )
 
         # A video whose metadata reads like a podcast (interview, panel, 访谈, ...)
-        # gets podcast-mode speaker labeling; a plain single-track video stays generic.
-        video_podcast_mode = bool(
+        # gets podcast-mode speaker labeling AND the rich podcast editor; a plain
+        # single-track video stays generic. An explicit flag on the message wins
+        # over the heuristic.
+        heuristic_podcast = bool(
             video_metadata
             and is_podcast_video(
                 video_metadata.title, video_metadata.channel, video_metadata.description
             )
+        )
+        podcast_mode = podcast_override if podcast_override is not None else heuristic_podcast
+        logger.info(
+            f"Podcast mode: {podcast_mode} "
+            f"({'override' if podcast_override is not None else 'heuristic'})"
         )
 
         # Transcribe
@@ -589,29 +640,50 @@ async def _process_video_url(
             transcriber_config,
             metadata=transcription_metadata,
             on_status=lambda s: logger.info(s),
-            podcast_mode=video_podcast_mode,
+            podcast_mode=podcast_mode,
         )
 
-        # Convert VideoMetadata to VideoEditorMetadata for editor
-        editor_metadata = None
-        if video_metadata:
-            editor_metadata = VideoEditorMetadata(
-                title=video_metadata.title,
-                channel=video_metadata.channel,
-                description=video_metadata.description,
-                upload_date=video_metadata.upload_date,
-                webpage_url=video_metadata.webpage_url,
-            )
-
-        # Edit/format
+        # Route by content form: a podcast-like video goes to the rich podcast
+        # editor (takeaways / Q&A / highlights + speaker-name correction from the
+        # episode context); a plain video stays on the generic editor (title /
+        # summary / key points). The same episode on YouTube and on Apple Podcasts
+        # should not get different output.
         await status_message.edit_text("✏️ Formatting transcript...")
-        edited_transcript = await edit(
-            raw_transcript,
-            editor_config,
-            enable_translation=enable_translation,
-            metadata=editor_metadata,
-            on_status=lambda s: logger.info(s),
-        )
+        if podcast_mode:
+            podcast_metadata = None
+            if video_metadata:
+                podcast_metadata = PodcastEpisodeMetadata(
+                    podcast_name=video_metadata.channel,
+                    episode_title=video_metadata.title,
+                    episode_link=video_metadata.webpage_url,
+                    publish_date=video_metadata.upload_date,
+                    shownotes=video_metadata.description,
+                )
+            edited_result = await edit_podcast(
+                raw_transcript,
+                editor_config,
+                metadata=podcast_metadata,
+                enable_translation=enable_translation,
+                on_status=lambda s: logger.info(s),
+            )
+            edited_transcript = edited_result.markdown
+        else:
+            editor_metadata = None
+            if video_metadata:
+                editor_metadata = VideoEditorMetadata(
+                    title=video_metadata.title,
+                    channel=video_metadata.channel,
+                    description=video_metadata.description,
+                    upload_date=video_metadata.upload_date,
+                    webpage_url=video_metadata.webpage_url,
+                )
+            edited_transcript = await edit(
+                raw_transcript,
+                editor_config,
+                enable_translation=enable_translation,
+                metadata=editor_metadata,
+                on_status=lambda s: logger.info(s),
+            )
         del raw_transcript  # Free memory early
 
         # Generate output files

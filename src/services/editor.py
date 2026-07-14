@@ -53,7 +53,7 @@ async def _gemini_generate(
     *,
     system: str | None = None,
     temperature: float = 1.0,
-    thinking_budget: int = 1024,
+    thinking_level: str = "high",
     max_tokens: int | None = None,
     schema: dict | None = None,
     timeout: float = GENERATION_TIMEOUT_SECONDS,
@@ -64,7 +64,10 @@ async def _gemini_generate(
     config = types.GenerateContentConfig(
         system_instruction=system,
         temperature=temperature,
-        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        # Gemini 3.x effort dial (low/medium/high, mutually exclusive with the
+        # legacy thinking_budget). "high" is the model's dynamic default; the
+        # cheap mechanical stages (translation, glossary) pass "low".
+        thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
         max_output_tokens=max_tokens,
         response_mime_type="application/json" if schema else None,
         response_schema=schema,
@@ -280,6 +283,7 @@ async def _extract_glossary(client: genai.Client, transcript: str, model: str) -
     response = await _gemini_generate(
         client, model, transcript[:300000],
         system=GLOSSARY_PROMPT, schema=GLOSSARY_SCHEMA, max_tokens=4096,
+        thinking_level="low",
     )
     if not response.text:
         return []
@@ -329,7 +333,7 @@ async def _generate_normal_metadata(
     sections: str,
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
     metadata: Optional["VideoEditorMetadata"] = None,
     background: str = "",
 ) -> dict:
@@ -341,7 +345,7 @@ async def _generate_normal_metadata(
         sections: Section definitions (from CONTEXT.md or DEFAULT_SECTIONS)
         model: Model to use
         temperature: Temperature setting
-        thinking_budget: Thinking budget
+        thinking_level: Gemini thinking level (low/medium/high)
         metadata: Optional video metadata for additional context
         background: Optional background context from CONTEXT.md
 
@@ -393,12 +397,13 @@ async def _generate_normal_metadata(
         "response_schema" if schema else "regex extraction",
     )
 
-    # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
-    # must hold the thinking budget (8192 on this path) PLUS the JSON itself.
+    # Gemini 3 counts thinking tokens against max_output_tokens, and with
+    # thinking_level the thinking size is dynamic (no fixed budget), so give the
+    # full model output cap; the truncation guard below still catches runaways.
     response = await _gemini_generate(
         client, model, user_content,
         system=system_prompt, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=16384, schema=schema,
+        thinking_level=thinking_level, max_tokens=65536, schema=schema,
     )
 
     if not response.text:
@@ -543,6 +548,7 @@ async def _translate_chunk(
         client, model, json.dumps(paragraphs, ensure_ascii=False),
         system=TRANSLATION_SYSTEM_PROMPT, temperature=temperature,
         schema=_translation_schema(len(paragraphs)), max_tokens=65536,
+        thinking_level="low",
     )
     if not response.text:
         raise ValueError("Translation returned empty result")
@@ -795,14 +801,8 @@ async def edit(
     # Get shared client (reuses HTTP connection pool)
     client = _get_client(config.api_key)
 
-    # Configure thinking budgets for different steps
-    # Raw editing and translation use low thinking (simple cleanup tasks)
-    # Metadata generation uses high thinking (needs deep reasoning for summarization)
-    thinking_budget_low = 1024
-    thinking_budget_high = 8192
-
     # ============================================
-    # Step 1: Edit raw transcript in chunks (parallel) - uses LOW thinking
+    # Step 1: Edit raw transcript in chunks (parallel)
     # ============================================
     if on_status:
         on_status("Editing raw transcript...")
@@ -832,7 +832,7 @@ async def edit(
                         chunk,
                         config.model,
                         config.temperature,
-                        thinking_budget_low,  # Raw editing uses low thinking
+                        config.thinking_level,  # EDITOR_THINKING_LEVEL (default "high")
                         index,
                         len(chunks),
                         metadata,
@@ -873,7 +873,7 @@ async def edit(
                 sections,
                 config.model,
                 config.temperature,
-                thinking_budget_high,  # Metadata generation uses high thinking
+                "high",  # Metadata generation always uses high thinking
                 metadata,
                 background,
             ),
@@ -940,7 +940,7 @@ async def _edit_raw_chunk(
     chunk: str,
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
     chunk_index: int,
     total_chunks: int,
     metadata: Optional[VideoEditorMetadata] = None,
@@ -983,7 +983,7 @@ async def _edit_raw_chunk(
     response = await _gemini_generate(
         client, model, user_content,
         system=system_prompt, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=65536,
+        thinking_level=thinking_level, max_tokens=65536,
     )
 
     # These guards raise so with_retry gets to retry a transient bad edit
@@ -1011,7 +1011,7 @@ async def _generate_final_output(
     system_prompt: str,
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
 ) -> str:
     """Generate final formatted output with Title/Summary/Key Points/Transcript."""
     logger.info("Generating final formatted output...")
@@ -1019,7 +1019,7 @@ async def _generate_final_output(
     response = await _gemini_generate(
         client, model, user_content,
         system=system_prompt, temperature=temperature,
-        thinking_budget=thinking_budget,
+        thinking_level=thinking_level,
     )
 
     # Validate response
@@ -1041,11 +1041,11 @@ async def _edit_transcript(
     system_prompt: str,
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
 ) -> str:
     """Edit transcript using Gemini model (legacy single-step)."""
     return await _generate_final_output(
-        client, user_content, system_prompt, model, temperature, thinking_budget
+        client, user_content, system_prompt, model, temperature, thinking_level
     )
 
 
@@ -1207,14 +1207,8 @@ async def edit_podcast(
     # Get shared client (reuses HTTP connection pool)
     client = _get_client(config.api_key)
 
-    # Configure thinking budgets for different steps
-    # Raw editing uses low thinking (simple cleanup tasks)
-    # Metadata generation uses high thinking (needs deep reasoning for summarization)
-    thinking_budget_low = 1024
-    thinking_budget_high = 8192
-
     # ============================================
-    # Step 1: Edit raw transcript in chunks (parallel) - uses LOW thinking
+    # Step 1: Edit raw transcript in chunks (parallel)
     # ============================================
     if on_status:
         on_status("Editing raw transcript...")
@@ -1244,7 +1238,7 @@ async def edit_podcast(
                     metadata,
                     config.model,
                     config.temperature,
-                    thinking_budget_low,  # Raw editing uses low thinking
+                    config.thinking_level,  # EDITOR_THINKING_LEVEL (default "high")
                     index,
                     len(chunks),
                     glossary,
@@ -1288,7 +1282,7 @@ async def edit_podcast(
                 metadata,
                 config.model,
                 config.temperature,
-                thinking_budget_high,  # Metadata generation uses high thinking
+                "high",  # Metadata generation always uses high thinking
             ),
             max_attempts=3,
             base_delay_ms=1000,
@@ -1351,7 +1345,7 @@ async def _edit_podcast_raw_chunk(
     metadata: Optional[PodcastEpisodeMetadata],
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
     chunk_index: int,
     total_chunks: int,
     glossary: Optional[List[str]] = None,
@@ -1397,7 +1391,7 @@ async def _edit_podcast_raw_chunk(
     response = await _gemini_generate(
         client, model, user_content,
         system=PODCAST_RAW_EDIT_SYSTEM_PROMPT, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=65536,
+        thinking_level=thinking_level, max_tokens=65536,
     )
 
     # These guards raise so with_retry gets to retry a transient bad edit
@@ -1425,7 +1419,7 @@ async def _generate_podcast_metadata(
     metadata: Optional[PodcastEpisodeMetadata],
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
 ) -> dict:
     """Generate metadata (summary, takeaways, Q&A, highlights) from edited transcript."""
     logger.info("Generating podcast metadata...")
@@ -1459,13 +1453,14 @@ async def _generate_podcast_metadata(
 
     user_content = "\n".join(parts)
 
-    # Gemini 3 counts thinking tokens against max_output_tokens, so the cap
-    # must hold the thinking budget (8192 on this path) PLUS the JSON itself;
-    # the podcast JSON (Q&A, highlights) runs long.
+    # Gemini 3 counts thinking tokens against max_output_tokens, and with
+    # thinking_level the thinking size is dynamic (no fixed budget), so give the
+    # full model output cap (the podcast JSON with Q&A and highlights runs long
+    # anyway); the truncation guard below still catches runaways.
     response = await _gemini_generate(
         client, model, user_content,
         system=PODCAST_METADATA_SYSTEM_PROMPT, temperature=temperature,
-        thinking_budget=thinking_budget, max_tokens=24576, schema=PODCAST_METADATA_SCHEMA,
+        thinking_level=thinking_level, max_tokens=65536, schema=PODCAST_METADATA_SCHEMA,
     )
 
     if not response.text:

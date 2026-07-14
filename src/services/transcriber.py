@@ -525,9 +525,6 @@ async def transcribe(
             if on_status:
                 on_status(f"Audio is {duration_minutes} minutes, processing as single file...")
 
-        # Configure thinking based on level
-        thinking_budget = 1024 if config.thinking_level == "low" else 8192
-
         # Get MIME type based on file extension
         ext = audio_path_obj.suffix.lower()
         mime_type = MIME_TYPES.get(ext, "audio/mpeg")
@@ -609,7 +606,7 @@ async def transcribe(
                         uploaded_file,
                         config.model,
                         config.temperature,
-                        thinking_budget,
+                        config.thinking_level,
                         metadata,
                         podcast_mode,
                     )
@@ -760,7 +757,7 @@ async def _transcribe_audio(
     uploaded_file: types.File,
     model: str,
     temperature: float,
-    thinking_budget: int,
+    thinking_level: str,
     metadata: Optional[TranscriptionMetadata] = None,
     podcast_mode: bool = False,
 ) -> str:
@@ -787,7 +784,9 @@ async def _transcribe_audio(
             ],
             config=types.GenerateContentConfig(
                 temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                # Gemini 3.x effort dial (low/medium/high, mutually exclusive
+                # with the legacy thinking_budget).
+                thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
             ),
         )
 

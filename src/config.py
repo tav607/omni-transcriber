@@ -13,7 +13,7 @@ class TranscriberConfig:
     api_key: str
     model: str = "gemini-pro-latest"
     temperature: float = 1.0
-    thinking_level: Literal["low", "high"] = "low"
+    thinking_level: Literal["low", "medium", "high"] = "high"
 
 
 @dataclass
@@ -22,7 +22,7 @@ class EditorConfig:
     model: str = "gemini-pro-latest"
     translation_model: str = "gemini-flash-latest"
     temperature: float = 1.0
-    thinking_level: Literal["low", "high"] = "high"
+    thinking_level: Literal["low", "medium", "high"] = "high"
     system_prompt: str = field(default="")
 
     def __post_init__(self):
@@ -156,11 +156,11 @@ Start with a level-1 heading (title), then divide into three sections with level
 ```"""
 
 
-def _validate_thinking_level(value: str, field_name: str) -> Literal["low", "high"]:
-    """Validate thinking_level value."""
-    if value not in ("low", "high"):
+def _validate_thinking_level(value: str, field_name: str) -> Literal["low", "medium", "high"]:
+    """Validate thinking_level value (Gemini 3.x native thinking_level)."""
+    if value not in ("low", "medium", "high"):
         raise ValueError(
-            f"Invalid {field_name}: '{value}'. Must be 'low' or 'high'."
+            f"Invalid {field_name}: '{value}'. Must be 'low', 'medium', or 'high'."
         )
     return value  # type: ignore
 
@@ -213,7 +213,7 @@ def load_config() -> AppConfig:
 
     # Validate thinking levels
     transcriber_thinking = _validate_thinking_level(
-        os.getenv("TRANSCRIBER_THINKING_LEVEL", "low"),
+        os.getenv("TRANSCRIBER_THINKING_LEVEL", "high"),
         "TRANSCRIBER_THINKING_LEVEL",
     )
     editor_thinking = _validate_thinking_level(

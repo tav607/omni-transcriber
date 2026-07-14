@@ -46,7 +46,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 All config via environment variables (see `.env.example`). Key settings:
 - `GEMINI_API_KEY` / `TELEGRAM_BOT_TOKEN` - Required
 - `TRANSCRIBER_MODEL` / `EDITOR_MODEL` / `TRANSLATION_MODEL` - Gemini models (default: gemini-pro-latest / gemini-pro-latest / gemini-flash-latest)
-- `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - "low" or "high"
+- `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - Gemini native thinking_level: "low", "medium", or "high" (both default "high"; metadata generation is always "high", translation/glossary always "low")
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
 - `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support
 - `TELEGRAM_API_SERVER` - Local Bot API server URL (optional, for files > 20MB)

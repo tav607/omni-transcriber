@@ -466,11 +466,73 @@ async def _generate_normal_metadata(
     raise ValueError(f"No valid JSON found in metadata output: {response_text[:500]}")
 
 
+# Fallback for locating the prepared-remarks -> Q&A transition when the
+# model-provided _qa_start_quote can't be matched. Anchored on phrasings that
+# only occur AT the transition ("we will now open the call up for questions",
+# "move over to Q&A", "our first question comes from"), never in the opening
+# boilerplate ("a question-and-answer session will follow the presentation").
+_QA_TRANSITION_FALLBACK_RE = re.compile(
+    r"open(?:ing)?(?:\s+\S+){0,3}\s+for\s+questions?"
+    r"|move\s+(?:over\s+)?to\s+(?:the\s+)?q\s*&\s*a"
+    r"|(?:take|go\s+to|start\s+with)\s+(?:our|the|your)\s+first\s+question"
+    r"|first\s+question\s+(?:comes|is)\s+from"
+    r"|begin\s+the\s+question[-\s]and[-\s]answer\s+session",
+    re.IGNORECASE,
+)
+
+
+def _norm_for_match(s: str) -> str:
+    """Normalize text for fuzzy paragraph matching: straight quotes, no bold
+    markers, collapsed whitespace, lowercase."""
+    s = _normalize_quotes(s).replace("*", "")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _split_transcript_at_qa(final_transcript: str, qa_start_quote: str) -> tuple[str, str | None]:
+    """Split the transcript into (management discussion, Q&A) at the paragraph
+    where the Q&A session begins. Primary locator is the metadata step's verbatim
+    _qa_start_quote; fallback is a transition-phrase regex. Returns (full, None)
+    when no boundary is found, so the caller emits a flat transcript instead of
+    guessing. Translation blockquotes (`> ...`) are never split points, so a
+    paragraph always stays with its translation."""
+    blocks = re.split(r"\n\n+", final_transcript)
+    split_idx = None
+
+    quote = _norm_for_match(qa_start_quote or "")[:150]
+    if len(quote) >= 15:
+        for i, block in enumerate(blocks):
+            if block.lstrip().startswith(">"):
+                continue
+            if quote in _norm_for_match(block):
+                split_idx = i
+                break
+
+    if split_idx is None:
+        for i, block in enumerate(blocks):
+            if block.lstrip().startswith(">"):
+                continue
+            if _QA_TRANSITION_FALLBACK_RE.search(block):
+                split_idx = i
+                break
+
+    if not split_idx:  # None or 0: a transcript that "starts at Q&A" means we mislocated
+        return final_transcript, None
+    return "\n\n".join(blocks[:split_idx]), "\n\n".join(blocks[split_idx:])
+
+
 def _build_normal_result(
     metadata_dict: dict,
     edited_transcript: str,
 ) -> str:
     """Build final Markdown from metadata dict and edited transcript.
+
+    Fields whose name starts with "_" are control fields, never rendered as
+    sections. Currently `_qa_start_quote` (requested via a CONTEXT.md Sections
+    definition, e.g. for earnings calls): the verbatim opening words of the
+    paragraph where the Q&A session begins. When present, the Transcript section
+    is split into "Management Discussion Section" / "Q&A Section" H3s at that
+    paragraph (transition-phrase regex as fallback; flat transcript if neither
+    matches).
 
     Args:
         metadata_dict: Dictionary with title, summary, key_points, etc.
@@ -517,7 +579,24 @@ def _build_normal_result(
     # Add transcript section
     parts.append("## Transcript")
     parts.append("")
-    parts.append(edited_transcript)
+    qa_quote = metadata_dict.get("_qa_start_quote")
+    qa_part = None
+    if isinstance(qa_quote, str):
+        md_part, qa_part = _split_transcript_at_qa(edited_transcript, qa_quote)
+    if qa_part:
+        parts.append("### Management Discussion Section")
+        parts.append("")
+        parts.append(md_part)
+        parts.append("")
+        parts.append("### Q&A Section")
+        parts.append("")
+        parts.append(qa_part)
+    else:
+        if isinstance(qa_quote, str):
+            logger.warning(
+                "Could not locate the Q&A transition; emitting a flat Transcript section"
+            )
+        parts.append(edited_transcript)
 
     return "\n".join(parts)
 

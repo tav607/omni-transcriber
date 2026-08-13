@@ -36,8 +36,11 @@ def _get_client(api_key: str) -> genai.Client:
         _client_cache[api_key] = genai.Client(api_key=api_key)
     return _client_cache[api_key]
 
-# Audio splitting constants
-MAX_DURATION_MINUTES = 45
+# Audio splitting constants. 15 minutes per chunk: transcription accuracy
+# degrades late in long chunks (2026-08 benchmarks in the transcribe skill:
+# ~4.3% word error at 15-min chunks vs 6.5-8.6% as a single 45-min chunk,
+# errors climbing from ~minute 18). Don't raise this.
+MAX_DURATION_MINUTES = 15
 OVERLAP_SECONDS = 10
 MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
@@ -94,7 +97,11 @@ PODCAST_SPEAKER_GUIDELINE = (
     "conversational role (the host asks the questions and drives transitions), "
     "otherwise **Speaker 1:**, **Speaker 2:** in order of first appearance. "
     "Distinguish speakers by their voices and keep each person's label consistent "
-    "for the whole audio"
+    "for the whole audio. Once a speaker's full name is known from the context or "
+    "audio, use the FULL name in every label (**Ted Sarandos:**, not **Ted:**; "
+    "first names can collide). Write names in the language of the audio: for "
+    "Chinese audio use Chinese characters (e.g. **刘子鸣:**, never pinyin or other "
+    "romanization), for English audio use the Latin spelling"
 )
 # Gentle labeling for single-track video (YouTube etc.), where forcing role or
 # numbered labels onto a single-presenter talk adds noise.
@@ -316,6 +323,58 @@ MAX_OVERLAP_SKIP = 1500
 # label text must not enter the n-gram matching or it poisons the seam detection.
 _SPEAKER_TOKEN_RE = re.compile(r'\*\*[^*\n]{1,40}[:：]\*\*')
 
+# Any **Name:** turn label at the start of a line.
+_NAMED_LABEL_RE = re.compile(r'^\*\*([^*\n]+?)\s*[:：]\*\*', re.MULTILINE)
+# Role words that look like single-token names but must never be merged into a
+# full-name label.
+_ROLE_LABEL_WORDS = {
+    "host", "guest", "operator", "speaker", "moderator", "interviewer",
+    "interviewee", "narrator", "unknown",
+}
+
+
+def _unify_short_name_labels(transcript: str) -> str:
+    """Merge first-name-only labels into the matching full-name label.
+
+    Chunks are labeled independently, so a chunk that never hears the speaker
+    introductions may label **Ted:** where other chunks used **Ted Sarandos:**.
+    Merge only on an exact, case-insensitive first-token match that is unique
+    across all full-name labels; prefix matching would conflate similar names
+    (e.g. Spence Neumann vs Spencer Wang). Chinese names have no spaces, so this
+    is a no-op for them (the transcription prompt pins their script instead).
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in _NAMED_LABEL_RE.finditer(transcript):
+        name = m.group(1).strip()
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            names.append(name)
+
+    multi = [n for n in names if len(n.split()) > 1]
+    single = [
+        n for n in names
+        if len(n.split()) == 1 and n.casefold() not in _ROLE_LABEL_WORDS
+    ]
+    if not multi or not single:
+        return transcript
+
+    remap: dict[str, str] = {}
+    for s in single:
+        matches = [m for m in multi if m.split()[0].casefold() == s.casefold()]
+        if len(matches) == 1:
+            remap[s.casefold()] = matches[0]
+
+    if not remap:
+        return transcript
+
+    def _sub(m: re.Match) -> str:
+        full = remap.get(m.group(1).strip().casefold())
+        return f"**{full}:**" if full else m.group(0)
+
+    return _NAMED_LABEL_RE.sub(_sub, transcript)
+
 
 def _strip_for_matching_with_map(text: str) -> tuple[str, list[int]]:
     """Strip speaker labels, whitespace, and punctuation for fuzzy overlap
@@ -465,7 +524,9 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
             )
         merged = merged + "\n\n" + current
 
-    return merged
+    # Chunks label speakers independently, so a later chunk may fall back to a
+    # first name; unify to full names after every seam is stitched.
+    return _unify_short_name_labels(merged)
 
 
 async def transcribe(

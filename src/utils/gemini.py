@@ -7,8 +7,10 @@ import asyncio
 # bot and the Dropbox watcher share one event loop, so a per-run cap would still
 # stack; a single module-level gate bounds the whole process. It also keeps the
 # per-call wait_for budgets honest: without a gate, chunks queue in the default
-# thread pool with their timeout clock already running.
-MAX_CONCURRENT_GEMINI_CALLS = 6
+# thread pool with their timeout clock already running. 16 = a 4h audio in one
+# wave at 15-min chunks; the account's paid tier (1000+ RPM on pro) is nowhere
+# near binding at this level.
+MAX_CONCURRENT_GEMINI_CALLS = 16
 # Safe at module scope on Python 3.10+: an asyncio.Semaphore binds to the loop on
 # first await, and the app runs a single asyncio.run loop.
 _gemini_sem = asyncio.Semaphore(MAX_CONCURRENT_GEMINI_CALLS)

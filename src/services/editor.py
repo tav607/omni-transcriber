@@ -12,7 +12,7 @@ from google.genai import types
 
 from ..config import EditorConfig
 from ..utils.gemini import is_truncated, _gemini_sem
-from ..utils.retry import with_retry
+from ..utils.retry import with_retry, with_model_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -667,10 +667,9 @@ async def _translate_transcript(
     async def translate_one(chunk: str) -> str:
         async with _gemini_sem:
             try:
-                return await with_retry(
-                    lambda: _translate_chunk(client, chunk, model, temperature),
-                    max_attempts=6,
-                    base_delay_ms=3000,
+                return await with_model_fallback(
+                    lambda _m: lambda: _translate_chunk(client, chunk, _m, temperature),
+                    model,
                     context="Translation chunk",
                 )
             except Exception as e:
@@ -905,11 +904,11 @@ async def edit(
     async def edit_chunk(chunk: str, index: int) -> str:
         async with _gemini_sem:
             try:
-                return await with_retry(
-                    lambda: _edit_raw_chunk(
+                return await with_model_fallback(
+                    lambda _m: lambda: _edit_raw_chunk(
                         client,
                         chunk,
-                        config.model,
+                        _m,
                         config.temperature,
                         config.thinking_level,  # EDITOR_THINKING_LEVEL (default "high")
                         index,
@@ -918,8 +917,7 @@ async def edit(
                         background,
                         glossary,
                     ),
-                    max_attempts=3,
-                    base_delay_ms=1000,
+                    config.model,
                     context=f"Editing chunk {index + 1}",
                 )
             except Exception as e:
@@ -945,19 +943,18 @@ async def edit(
     sections = sections_override or DEFAULT_SECTIONS
 
     async def _run_metadata() -> dict:
-        return await with_retry(
-            lambda: _generate_normal_metadata(
+        return await with_model_fallback(
+            lambda _m: lambda: _generate_normal_metadata(
                 client,
                 edited_transcript,
                 sections,
-                config.model,
+                _m,
                 config.temperature,
                 "high",  # Metadata generation always uses high thinking
                 metadata,
                 background,
             ),
-            max_attempts=3,
-            base_delay_ms=1000,
+            config.model,
             context="Generating metadata",
         )
 
@@ -1310,20 +1307,19 @@ async def edit_podcast(
     # Process all chunks in parallel
     async def edit_chunk(chunk: str, index: int) -> str:
         async with _gemini_sem:
-            return await with_retry(
-                lambda: _edit_podcast_raw_chunk(
+            return await with_model_fallback(
+                lambda _m: lambda: _edit_podcast_raw_chunk(
                     client,
                     chunk,
                     metadata,
-                    config.model,
+                    _m,
                     config.temperature,
                     config.thinking_level,  # EDITOR_THINKING_LEVEL (default "high")
                     index,
                     len(chunks),
                     glossary,
                 ),
-                max_attempts=3,
-                base_delay_ms=1000,
+                config.model,
                 context=f"Editing chunk {index + 1}",
             )
 
@@ -1354,17 +1350,16 @@ async def edit_podcast(
     logger.info("Generating metadata from edited transcript...")
 
     async def _run_metadata() -> dict:
-        return await with_retry(
-            lambda: _generate_podcast_metadata(
+        return await with_model_fallback(
+            lambda _m: lambda: _generate_podcast_metadata(
                 client,
                 edited_transcript,
                 metadata,
-                config.model,
+                _m,
                 config.temperature,
                 "high",  # Metadata generation always uses high thinking
             ),
-            max_attempts=3,
-            base_delay_ms=1000,
+            config.model,
             context="Generating metadata",
         )
 

@@ -12,18 +12,24 @@ MAX_RETRY_DELAY_MS = 60_000
 
 async def with_retry(
     fn: Callable[[], Awaitable[T]],
-    max_attempts: int = 3,
-    base_delay_ms: int = 1000,
+    max_attempts: int = 6,
+    base_delay_ms: int = 3000,
     context: str = "Operation",
     non_retryable_exceptions: tuple[type[BaseException], ...] = (),
 ) -> T:
     """
     Retry an async function with exponential backoff and jitter.
 
+    The ladder is deliberately long. A newly released model can spend its first
+    weeks returning 503 UNAVAILABLE under load: on 2026-08-14, four of five
+    full-length transcriptions on gemini-3.7-flash died on the old 3-attempt/1s
+    ladder while a single sequential run got through untouched. Retries cost
+    nothing when the API is healthy.
+
     Args:
         fn: The async function to retry
-        max_attempts: Maximum number of attempts (default: 3)
-        base_delay_ms: Base delay in milliseconds (default: 1000)
+        max_attempts: Maximum number of attempts (default: 6)
+        base_delay_ms: Base delay in milliseconds (default: 3000)
         context: Context string for log messages (default: 'Operation')
         non_retryable_exceptions: Exception types that should propagate
             immediately without retrying (e.g. a content-policy block)

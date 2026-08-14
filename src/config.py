@@ -11,7 +11,7 @@ load_dotenv(override=True)
 @dataclass
 class TranscriberConfig:
     api_key: str
-    model: str = "gemini-pro-latest"
+    model: str = "gemini-3.7-flash"
     temperature: float = 1.0
     thinking_level: Literal["low", "medium", "high"] = "high"
 
@@ -19,7 +19,7 @@ class TranscriberConfig:
 @dataclass
 class EditorConfig:
     api_key: str
-    model: str = "gemini-pro-latest"
+    model: str = "gemini-3.7-flash"
     translation_model: str = "gemini-flash-latest"
     temperature: float = 1.0
     thinking_level: Literal["low", "medium", "high"] = "high"
@@ -223,14 +223,14 @@ def load_config() -> AppConfig:
 
     transcriber = TranscriberConfig(
         api_key=gemini_api_key,
-        model=os.getenv("TRANSCRIBER_MODEL", "gemini-pro-latest"),
+        model=os.getenv("TRANSCRIBER_MODEL", "gemini-3.7-flash"),
         temperature=float(os.getenv("TRANSCRIBER_TEMPERATURE", "1.0")),
         thinking_level=transcriber_thinking,
     )
 
     editor = EditorConfig(
         api_key=gemini_api_key,
-        model=os.getenv("EDITOR_MODEL", "gemini-pro-latest"),
+        model=os.getenv("EDITOR_MODEL", "gemini-3.7-flash"),
         translation_model=os.getenv("TRANSLATION_MODEL", "gemini-flash-latest"),
         temperature=float(os.getenv("EDITOR_TEMPERATURE", "1.0")),
         thinking_level=editor_thinking,

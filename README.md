@@ -79,8 +79,8 @@ Edit `.env` with your credentials:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_ALLOWED_CHAT_IDS` | *(empty, allows all)* | Comma-separated authorized Chat IDs |
-| `TRANSCRIBER_MODEL` | `gemini-pro-latest` | Model for transcription |
-| `EDITOR_MODEL` | `gemini-pro-latest` | Model for formatting |
+| `TRANSCRIBER_MODEL` | `gemini-3.7-flash` | Model for transcription |
+| `EDITOR_MODEL` | `gemini-3.7-flash` | Model for formatting |
 | `TRANSLATION_MODEL` | `gemini-flash-latest` | Model for inline translation |
 | `TRANSCRIBER_TEMPERATURE` | `1.0` | Transcription temperature |
 | `EDITOR_TEMPERATURE` | `1.0` | Editor temperature |

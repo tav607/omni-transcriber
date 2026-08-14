@@ -669,8 +669,8 @@ async def _translate_transcript(
             try:
                 return await with_retry(
                     lambda: _translate_chunk(client, chunk, model, temperature),
-                    max_attempts=3,
-                    base_delay_ms=1000,
+                    max_attempts=6,
+                    base_delay_ms=3000,
                     context="Translation chunk",
                 )
             except Exception as e:

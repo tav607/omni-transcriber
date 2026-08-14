@@ -66,3 +66,49 @@ async def with_retry(
     # than a bare Exception that would erase it.
     assert last_error is not None
     raise last_error
+
+
+# A model whose capacity has collapsed cannot be retried out of: on 2026-08-14
+# gemini-3.7-flash answered 2 of 16 calls, the rest 503 UNAVAILABLE, while
+# gemini-3.1-pro answered 10 of 10 in the same minute and at the same
+# concurrency. Serial calls fared no better than parallel ones, so no backoff
+# ladder reaches the other side of it.
+FALLBACK_MODEL = "gemini-pro-latest"
+
+
+async def with_model_fallback(
+    make_call: Callable[[str], Callable[[], Awaitable[T]]],
+    model: str,
+    context: str = "Operation",
+    non_retryable_exceptions: tuple[type[BaseException], ...] = (),
+    fallback_model: str = FALLBACK_MODEL,
+) -> T:
+    """Run `make_call(model)` through with_retry, then retry on another model.
+
+    `make_call` takes a model id and returns the zero-argument coroutine
+    function that with_retry expects, so the fallback attempt rebuilds the
+    request against a different model rather than replaying the first one.
+
+    Only exhaustion of the retry ladder triggers the switch. A non-retryable
+    failure is a property of the request (a content block, a malformed prompt)
+    and would fail on any model, so it propagates untouched.
+    """
+    try:
+        return await with_retry(
+            make_call(model), context=context,
+            non_retryable_exceptions=non_retryable_exceptions,
+        )
+    except non_retryable_exceptions:
+        raise
+    except Exception as error:
+        if model == fallback_model:
+            raise
+        logger.warning(
+            f"{context}: {model} exhausted its retries ({error}); "
+            f"falling back to {fallback_model} for this call"
+        )
+        return await with_retry(
+            make_call(fallback_model),
+            context=f"{context} on {fallback_model}",
+            non_retryable_exceptions=non_retryable_exceptions,
+        )

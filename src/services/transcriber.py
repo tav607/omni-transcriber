@@ -16,7 +16,7 @@ from google.genai import types
 
 from ..config import TranscriberConfig
 from ..utils.gemini import is_truncated, _gemini_sem
-from ..utils.retry import with_retry
+from ..utils.retry import with_retry, with_model_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,39 @@ MIME_TYPES = {
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
 }
+
+
+# Inlining the audio caps the whole request at 20MB, and chunks are cut with
+# ffmpeg stream copy so they inherit the source bitrate: 15 minutes of 320kbps
+# audio is ~36MB. Anything near the ceiling is re-encoded to 64kbps mono, which
+# fits 15 minutes into ~7MB and stays well above what speech recognition needs.
+INLINE_AUDIO_MAX_BYTES = 18_000_000
+
+
+async def _inline_audio_part(path: Path, temp_dir: Path, mime_type: str) -> types.Part:
+    """Read a chunk into an inline request part, re-encoding if it is too big."""
+    src = path
+    if path.stat().st_size > INLINE_AUDIO_MAX_BYTES:
+        src = temp_dir / f"{path.stem}_inline.mp3"
+        if not src.exists():
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["ffmpeg", "-y", "-v", "error", "-i", str(path),
+                 "-ac", "1", "-b:a", "64k", "--", str(src)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Inline fallback: mp3 re-encode failed: {result.stderr[-300:]}"
+                )
+        size = src.stat().st_size
+        if size > INLINE_AUDIO_MAX_BYTES:
+            raise RuntimeError(
+                f"Inline fallback: chunk is still {size / 1e6:.0f}MB after "
+                "re-encoding, too large to send inline"
+            )
+        mime_type = "audio/mpeg"
+    return types.Part.from_bytes(data=src.read_bytes(), mime_type=mime_type)
 
 
 def cleanup_repetitive_characters(text: str, max_repeats: int = 10) -> str:
@@ -663,19 +696,50 @@ async def transcribe(
             else:
                 on_status("Transcribing...")
 
-        async def transcribe_chunk(uploaded_file: types.File, duration_s: float) -> str:
+        async def transcribe_chunk(
+            uploaded_file: types.File, chunk_path: Path, duration_s: float
+        ) -> str:
             # Gate around the call, outside _transcribe_audio's own wait_for, so
             # queue time doesn't burn the per-chunk timeout budget.
-            async def _attempt():
-                async with _gemini_sem:
-                    return await _transcribe_audio(
-                        client,
-                        uploaded_file,
-                        config.model,
-                        config.temperature,
-                        config.thinking_level,
-                        metadata,
-                        podcast_mode,
+            def _attempts_from(audio_source):
+                def _attempt_on(model_id: str):
+                    async def _attempt():
+                        async with _gemini_sem:
+                            return await _transcribe_audio(
+                                client,
+                                audio_source,
+                                model_id,
+                                config.temperature,
+                                config.thinking_level,
+                                metadata,
+                                podcast_mode,
+                            )
+                    return _attempt
+                return _attempt_on
+
+            async def _one_pass() -> str:
+                try:
+                    return await with_model_fallback(
+                        _attempts_from(uploaded_file), config.model,
+                        context="Transcription",
+                    )
+                except Exception as error:
+                    # A File API handle can be rejected independently of the
+                    # model: on 2026-08-14 every uploaded-file request returned
+                    # 403 PERMISSION_DENIED on both models while the same audio
+                    # sent inline transcribed fine. Swapping models cannot fix
+                    # that, so the last resort drops the file reference entirely.
+                    logger.warning(
+                        f"Transcription: the File API path failed on every model "
+                        f"({error}); retrying with the audio inlined in the request"
+                    )
+                    part = await _inline_audio_part(
+                        chunk_path, temp_dir,
+                        MIME_TYPES.get(chunk_path.suffix.lower(), mime_type),
+                    )
+                    return await with_model_fallback(
+                        _attempts_from(part), config.model,
+                        context="Transcription (inline)",
                     )
 
             # Degenerate-output guard: a chunk that transcribes to almost nothing
@@ -688,12 +752,7 @@ async def transcribe(
             min_chars = max(10, int(duration_s * MIN_TRANSCRIPT_CHARS_PER_SEC))
             text = ""
             for attempt in range(1, TRANSCRIPTION_SHORT_RETRIES + 1):
-                text = await with_retry(
-                    _attempt,
-                    max_attempts=6,
-                    base_delay_ms=3000,
-                    context="Transcription",
-                )
+                text = await _one_pass()
                 cleaned_len = len(cleanup_repetitive_characters(text).strip())
                 if duration_s <= 0 or cleaned_len >= min_chars:
                     return text
@@ -710,7 +769,8 @@ async def transcribe(
             return text
 
         transcribe_tasks = [
-            transcribe_chunk(f, d) for f, d in zip(uploaded_files, chunk_durations_s)
+            transcribe_chunk(f, p, d)
+            for f, p, d in zip(uploaded_files, chunk_paths, chunk_durations_s)
         ]
         # Settle every chunk before raising: a bare gather propagates the first
         # failure while sibling transcriptions are still in flight, and the
@@ -821,7 +881,7 @@ async def _upload_file(
 
 async def _transcribe_audio(
     client: genai.Client,
-    uploaded_file: types.File,
+    uploaded_file: types.File | types.Part,
     model: str,
     temperature: float,
     thinking_level: str,
@@ -829,10 +889,20 @@ async def _transcribe_audio(
     podcast_mode: bool = False,
 ) -> str:
     """Transcribe audio using Gemini model."""
-    logger.info(f"Processing transcription for {uploaded_file.name}...")
+    source = getattr(uploaded_file, "name", None) or "inline audio"
+    logger.info(f"Processing transcription for {source}...")
 
     # Build prompt with or without metadata context
     prompt = _build_transcription_prompt(metadata, podcast_mode)
+    # Either a File API handle or an already-built inline part, so the inline
+    # fallback reuses this function rather than duplicating prompt assembly.
+    audio_part = (
+        uploaded_file
+        if isinstance(uploaded_file, types.Part)
+        else types.Part.from_uri(
+            file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type
+        )
+    )
 
     def _generate():
         return client.models.generate_content(
@@ -840,13 +910,7 @@ async def _transcribe_audio(
             contents=[
                 types.Content(
                     role="user",
-                    parts=[
-                        types.Part.from_text(text=prompt),
-                        types.Part.from_uri(
-                            file_uri=uploaded_file.uri,
-                            mime_type=uploaded_file.mime_type,
-                        ),
-                    ],
+                    parts=[types.Part.from_text(text=prompt), audio_part],
                 )
             ],
             config=types.GenerateContentConfig(

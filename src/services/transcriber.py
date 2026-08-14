@@ -91,6 +91,10 @@ Output the complete transcript only."""
 # Strong speaker labeling for conversational audio (podcasts, meetings, uploaded
 # recordings). The bolded **Name:** format pairs with _SPEAKER_TOKEN_RE at merge
 # time, so seam detection can mask the labels out.
+# The example names are placeholders, not real people: gemini-3.7-flash was caught
+# lifting a real-sounding example name out of this rule and using it as the actual
+# speaker label in 3 of 9 Chinese runs (2026-08-14), so the format illustration must
+# not look like someone the model could plausibly be hearing.
 PODCAST_SPEAKER_GUIDELINE = (
     "- Label every speaker turn: start the turn with **Name:** when the context or "
     "audio identifies the speaker's real name, otherwise **Host:** / **Guest:** by "
@@ -98,10 +102,12 @@ PODCAST_SPEAKER_GUIDELINE = (
     "otherwise **Speaker 1:**, **Speaker 2:** in order of first appearance. "
     "Distinguish speakers by their voices and keep each person's label consistent "
     "for the whole audio. Once a speaker's full name is known from the context or "
-    "audio, use the FULL name in every label (**Ted Sarandos:**, not **Ted:**; "
+    "audio, use the FULL name in every label (**Jane Doe:**, not **Jane:**; "
     "first names can collide). Write names in the language of the audio: for "
-    "Chinese audio use Chinese characters (e.g. **刘子鸣:**, never pinyin or other "
-    "romanization), for English audio use the Latin spelling"
+    "Chinese audio use Chinese characters (e.g. **张三:**, never pinyin or other "
+    "romanization), for English audio use the Latin spelling. The names in these "
+    "examples are placeholders showing the format only; never use them as a "
+    "speaker label"
 )
 # Gentle labeling for single-track video (YouTube etc.), where forcing role or
 # numbered labels onto a single-presenter talk adds noise.
@@ -337,7 +343,7 @@ def _unify_short_name_labels(transcript: str) -> str:
     """Merge first-name-only labels into the matching full-name label.
 
     Chunks are labeled independently, so a chunk that never hears the speaker
-    introductions may label **Ted:** where other chunks used **Ted Sarandos:**.
+    introductions may label **Jane:** where other chunks used **Jane Doe:**.
     Merge only on an exact, case-insensitive first-token match that is unique
     across all full-name labels; prefix matching would conflate similar names
     (e.g. Spence Neumann vs Spencer Wang). Chinese names have no spaces, so this

@@ -690,8 +690,8 @@ async def transcribe(
             for attempt in range(1, TRANSCRIPTION_SHORT_RETRIES + 1):
                 text = await with_retry(
                     _attempt,
-                    max_attempts=3,
-                    base_delay_ms=1000,
+                    max_attempts=6,
+                    base_delay_ms=3000,
                     context="Transcription",
                 )
                 cleaned_len = len(cleanup_repetitive_characters(text).strip())

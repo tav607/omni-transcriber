@@ -29,17 +29,21 @@ router = Router()
 # Initialize settings store on module load
 settings_store.init()
 
-# Model options
+# Model options. "flash" is pinned to a version rather than the moving alias:
+# gemini-flash-latest silently repointed to 3.7-flash on release day, which put
+# the pipeline on an untested model without anyone choosing to.
 MODELS = {
-    "flash": "gemini-flash-latest",
+    "flash": "gemini-3.7-flash",
     "pro": "gemini-pro-latest",
 }
 
-# Default models. Transcription accuracy is the floor for the whole pipeline,
-# so the transcriber defaults to pro, matching the env-level TranscriberConfig
-# default (chats that picked a model explicitly keep their stored choice).
-DEFAULT_TRANSCRIBER_MODEL = "pro"
-DEFAULT_EDITOR_MODEL = "pro"
+# Default models. Measured against the CoreWeave Q2 2026 corrected transcript
+# and Dwarkesh's published transcript on 2026-08-14, 3.7-flash matches 3.1-pro
+# on word error rate and beats it on entity recall, while 1 of 5 pro runs
+# fabricated 146 words of plausible financial guidance that was never spoken.
+# Chats that picked a model explicitly keep their stored choice.
+DEFAULT_TRANSCRIBER_MODEL = "flash"
+DEFAULT_EDITOR_MODEL = "flash"
 
 # Supported audio MIME types
 AUDIO_MIME_TYPES = [

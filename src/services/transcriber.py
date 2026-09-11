@@ -83,7 +83,7 @@ PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE = """You are a professional transcriptioni
 - If the audio is in English, output in English
 - Do not add explanations or commentary
 - Do not translate - keep the original language
-{speaker_guideline}
+{speaker_guideline}{date_anchor}
 - For unclear audio, use [inaudible] or [unclear]
 
 Output the complete transcript only."""
@@ -185,9 +185,25 @@ def _build_transcription_prompt(
     if not metadata_lines:
         metadata_lines.append("- (no metadata available)")
 
+    # Year anchor (backported from the transcribe skill, 2026-09-11): without it
+    # a pass can rewrite every spoken year to an earlier one from training memory
+    # and drag product names and titles back a generation with it (Netflix Q2
+    # 2026: 2026 -> 2024, current slate -> Bridgerton/Under Paris/Golf; CRWV:
+    # Vera Rubin NVL72 -> GB200 NVL72). Measured on gemini-3.7-flash, 6 passes
+    # per variant: no metadata 4/12 drifted, title + date lines alone 4/12,
+    # this explicit rule 0/12. The date line by itself does not protect.
+    date_anchor = ""
+    if metadata is not None and metadata.publish_date:
+        date_anchor = (
+            f"\n- This recording is dated {metadata.publish_date}. Transcribe every spoken year exactly as heard; "
+            f"never shift a year, quarter, or product generation to an earlier one from memory. "
+            f"Names and products that sound unfamiliar are current as of {metadata.publish_date}; write them as heard."
+        )
+
     return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(
         metadata_section="\n".join(metadata_lines),
         speaker_guideline=PODCAST_SPEAKER_GUIDELINE if podcast_mode else GENERIC_SPEAKER_GUIDELINE,
+        date_anchor=date_anchor,
     )
 
 # MIME type mapping

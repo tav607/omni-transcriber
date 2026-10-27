@@ -2,7 +2,9 @@
 
 Backported from the transcribe skill (tav607/my-claude-skills b2ae63f). The
 tokenizer and number folding come from the skill's consensus reconcile, which
-is why they keep its _cons_ names: the two copies stay easy to diff.
+is why they keep its _cons_ names: the two copies stay easy to diff. Also home
+to _residual_content, which tells the editor whether a chunk has anything
+spoken in it at all.
 """
 
 import difflib
@@ -18,6 +20,17 @@ _TIMESTAMP_RE = re.compile(r'\*\*\d{1,2}:\d{2}(?::\d{2})?\*\*|\[\d{1,2}:\d{2}:\d
 # Uppercase bracketed sound effects like [MUSIC PLAYING]. Lowercase [inaudible]
 # / [unclear] are real transcript content and deliberately not masked here.
 _SOUND_EFFECT_RE = re.compile(r'\[[A-Z][A-Z\s]+\]')
+
+
+def _residual_content(chunk: str) -> str:
+    """The chunk's actual spoken text, with timestamps / sound-effect tags /
+    speaker labels stripped. '' means the chunk is pure markup (music intro,
+    silence); a non-empty result is real content that must be preserved even if
+    it's too short to be worth an LLM edit."""
+    text = _TIMESTAMP_RE.sub('', chunk)
+    text = _SOUND_EFFECT_RE.sub('', text)
+    text = _SPEAKER_TOKEN_RE.sub('', text)
+    return text.strip()
 
 # Single CJK chars first (Chinese has no word spacing, so alignment is per
 # character, the CER convention), then unicode word runs excluding CJK (so

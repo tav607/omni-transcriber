@@ -14,7 +14,7 @@ from ..config import EditorConfig
 from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
-from .edit_guard import _restore_edit_losses
+from .edit_guard import _residual_content, _restore_edit_losses
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,11 @@ def _get_client(api_key: str) -> genai.Client:
 # Chunk size for transcript editing (characters)
 CHUNK_SIZE = 32000  # 32K characters per chunk for raw transcript editing
 CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
-MIN_MEANINGFUL_CONTENT = 50  # Minimum chars of actual text (excluding timestamps/sound effects)
+# A chunk with fewer than this many chars of real text (after stripping
+# timestamps / sound-effect tags / speaker labels) isn't worth an LLM edit call.
+# This is only the threshold for SKIPPING the call, not for discarding content:
+# a short-but-non-empty chunk is kept raw (see _skip_edit).
+MIN_MEANINGFUL_CONTENT = 50
 # Edited chunk shorter than this fraction of the raw chunk = over-summarized.
 EDIT_MIN_KEEP_RATIO = 0.55
 
@@ -119,25 +123,26 @@ def _log_edit_guard_total(restored_spans: List[int]) -> None:
     )
 
 
-def _has_meaningful_content(chunk: str) -> bool:
-    """Check if a chunk has meaningful content beyond just timestamps/sound effects.
+def _skip_edit(chunk: str, index: int) -> str | None:
+    """What an edit chunk becomes without an edit call, or None to edit it.
 
-    Args:
-        chunk: The transcript chunk to check
-
-    Returns:
-        True if chunk has enough meaningful text content
+    Same rule as the transcribe skill's edit_one: only a chunk that is pure
+    markup (timestamps, sound-effect tags, speaker labels) is dropped. Real
+    speech too short to be worth an edit call is kept raw, as an edit that
+    failed after retries would be. The podcast editor used to drop every chunk
+    under MIN_MEANINGFUL_CONTENT characters, real speech included, and its
+    label pattern did not match **Name:** labels.
     """
-    # Remove timestamps like [00:00:00] or [HH:MM:SS]
-    text = re.sub(r'\[\d{1,2}:\d{2}:\d{2}\]', '', chunk)
-    # Remove sound effects like [MUSIC PLAYING], [APPLAUSE], etc.
-    text = re.sub(r'\[[A-Z][A-Z\s]+\]', '', text)
-    # Remove speaker labels like **Name:**
-    text = re.sub(r'\*\*[^*]+\*\*:', '', text)
-    # Remove whitespace
-    text = text.strip()
-
-    return len(text) >= MIN_MEANINGFUL_CONTENT
+    residual = _residual_content(chunk)
+    if not residual:
+        logger.info(f"Edit chunk {index + 1}: no spoken content, dropping")
+        return ""
+    if len(residual) < MIN_MEANINGFUL_CONTENT:
+        logger.info(
+            f"Edit chunk {index + 1}: below edit threshold ({len(residual)} chars), keeping raw"
+        )
+        return chunk
+    return None
 
 
 def _normalize_quotes(text: str) -> str:
@@ -931,6 +936,9 @@ async def edit(
     restored_spans: List[int] = []
 
     async def edit_chunk(chunk: str, index: int) -> str:
+        skipped = _skip_edit(chunk, index)
+        if skipped is not None:
+            return skipped
         try:
             async with _gemini_sem:
                 edited = await with_model_fallback(
@@ -962,8 +970,8 @@ async def edit(
     logger.info(f"Edited {len(edited_chunks)} chunks")
     _log_edit_guard_total(restored_spans)
 
-    # Combine edited chunks
-    edited_transcript = "\n\n".join(edited_chunks)
+    # Combine edited chunks (a dropped markup-only chunk comes back empty)
+    edited_transcript = "\n\n".join(c for c in edited_chunks if c.strip())
 
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
@@ -1344,6 +1352,9 @@ async def edit_podcast(
     restored_spans: List[int] = []
 
     async def edit_chunk(chunk: str, index: int) -> str:
+        skipped = _skip_edit(chunk, index)
+        if skipped is not None:
+            return skipped
         async with _gemini_sem:
             edited = await with_model_fallback(
                 lambda _m: lambda: _edit_podcast_raw_chunk(
@@ -1360,8 +1371,6 @@ async def edit_podcast(
                 config.model,
                 context=f"Editing chunk {index + 1}",
             )
-        if not edited:
-            return edited  # skipped by _has_meaningful_content, filtered out below
         # Before anything else reads the edit: put back what the editor dropped
         # or reworded beyond cleanup.
         return await _guard_edit(chunk, edited, index, restored_spans)
@@ -1377,7 +1386,7 @@ async def edit_podcast(
             logger.error(f"Failed to edit chunk {i + 1}/{len(chunks)}: {result}")
             # Use original chunk as fallback
             edited_chunks.append(chunks[i])
-        elif result:  # Skip empty strings (from skipped chunks)
+        elif result:  # skip markup-only chunks _skip_edit dropped
             edited_chunks.append(result)
 
     logger.info(f"Edited {len(edited_chunks)} chunks")
@@ -1469,14 +1478,6 @@ async def _edit_podcast_raw_chunk(
     glossary: Optional[List[str]] = None,
 ) -> str:
     """Edit a raw transcript chunk with podcast context (fix errors, remove fillers, format speakers)."""
-    # Pre-validation: skip chunks without meaningful content
-    if not _has_meaningful_content(chunk):
-        logger.warning(
-            f"Chunk {chunk_index + 1}/{total_chunks}: Skipping - "
-            f"no meaningful content (only timestamps/sound effects)"
-        )
-        return ""  # Return empty string, will be filtered out when joining
-
     logger.info(f"Processing podcast chunk {chunk_index + 1}/{total_chunks}...")
 
     # Build user content with full metadata context

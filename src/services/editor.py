@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import re
 import logging
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 from .edit_guard import _residual_content, _restore_edit_losses
+from .transcriber import _SPEAKER_TOKEN_RE, _is_cjk_heavy
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,13 @@ def _get_client(api_key: str) -> genai.Client:
 
 # Chunk size for transcript editing (characters)
 CHUNK_SIZE = 32000  # 32K characters per chunk for raw transcript editing
+# Chinese spends about twice the output tokens per character that English does
+# (gemini-4-argon edits of two October 2026 Chinese calls: 0.53-0.59 tokens per
+# output char), and Argon's 32,768-token output cap also has to hold its
+# thinking, which reached 15k tokens on a full 32,000-char chunk, leaving under
+# 4k of headroom. A truncated edit is retried six times before the fallback
+# model gets it, so CJK-heavy transcripts are split smaller instead.
+CJK_CHUNK_SIZE = 20000
 CHUNK_OVERLAP = 500  # Overlap to avoid cutting mid-sentence
 # A chunk with fewer than this many chars of real text (after stripping
 # timestamps / sound-effect tags / speaker labels) isn't worth an LLM edit call.
@@ -787,91 +796,85 @@ Use the video information provided to help identify correct speaker names, chann
 - 直接输出编辑后的转录文本
 """
 
-def _split_into_chunks(transcript: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
-    """
-    Split transcript into manageable chunks for editing.
+# Speaker-turn boundary: a newline before a "Name:" label. First branch is the
+# transcription prompts' own contract, the colon-inside-bold **Name:** form
+# (identical to _SPEAKER_TOKEN_RE); second branch keeps the looser
+# bold-before-colon / plain "Name: " form Gemini sometimes emits. omni's
+# previous splitter had only the second branch, so it matched none of the
+# labeled transcripts and let stray prose colons drive the split; this regex
+# and the splitter below are the transcribe skill's.
+_EDIT_SPLIT_BOUNDARY_RE = re.compile(
+    r'\n(?=\*\*[^*\n]{1,40}[:：]\*\*|(?:\*\*)?[^*\n:：]{1,30}(?:\*\*)?[:：]\s)'
+)
 
-    Tries to split at dialogue boundaries (speaker changes) to avoid
-    cutting in the middle of a speaker's turn. Falls back to paragraph
-    boundaries if no speaker patterns found.
 
-    Args:
-        transcript: The transcript text to split
-        chunk_size: Maximum size of each chunk
-
-    Returns:
-        List of transcript chunks
-    """
-    if len(transcript) <= chunk_size:
+def _split_into_chunks(transcript: str, max_size: int = CHUNK_SIZE) -> list[str]:
+    """Split for editing, preferring speaker-turn boundaries so a turn is never
+    cut mid-way (a chunk that starts without its label makes the editor mislabel
+    or invent speakers). Falls back to paragraph breaks when the transcript has
+    no labels, and force-splits any single span still larger than the chunk
+    size, snapping to a paragraph break within CHUNK_OVERLAP of the cut when
+    possible. Pieces are sized evenly under max_size, so a transcript just over
+    it does not leave a sliver of a chunk that costs a whole call."""
+    if len(transcript) <= max_size:
         return [transcript]
+    # Packing whole turns never fills a chunk exactly: count pieces at 90% of
+    # the cap and aim each a little above its even share, or a near-exact
+    # split spills a sliver into one more piece.
+    pieces = math.ceil(len(transcript) / (0.9 * max_size))
+    size = min(max_size, math.ceil(len(transcript) / pieces * 1.15))
 
-    chunks = []
-
-    # Pattern to match speaker labels like "**Speaker Name:**" or "Speaker Name:"
-    speaker_pattern = re.compile(r'\n(?=(?:\*\*)?[^*\n:]{1,30}(?:\*\*)?:\s)')
-
-    # Find all speaker change positions
-    speaker_positions = [0] + [m.start() + 1 for m in speaker_pattern.finditer(transcript)]
-    speaker_positions.append(len(transcript))
-
-    if len(speaker_positions) <= 2:
-        # No speaker labels found, fall back to paragraph splitting
-        paragraphs = re.split(r'\n\n+', transcript)
-        current_chunk = []
-        current_size = 0
-
-        for para in paragraphs:
-            para_size = len(para) + 2  # +2 for \n\n
-
-            if current_size + para_size > chunk_size and current_chunk:
-                chunks.append('\n\n'.join(current_chunk))
-                current_chunk = [para]
-                current_size = para_size
-            else:
-                current_chunk.append(para)
-                current_size += para_size
-
-        if current_chunk:
-            chunks.append('\n\n'.join(current_chunk))
+    positions = [m.start() + 1 for m in _EDIT_SPLIT_BOUNDARY_RE.finditer(transcript)]
+    if positions:
+        bounds = [0] + positions + [len(transcript)]
+        segments = [transcript[a:b] for a, b in zip(bounds, bounds[1:])]
+        joiner = ""  # segments already include their separating newlines
     else:
-        # Split at speaker boundaries
-        current_start = 0
-        current_chunk_end = 0
+        segments = re.split(r'\n\n+', transcript)
+        joiner = "\n\n"
 
-        for pos in speaker_positions[1:]:
-            segment_end = pos
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    sep = len(joiner)
 
-            if segment_end - current_start > chunk_size:
-                if current_chunk_end > current_start:
-                    # Save current chunk up to previous speaker boundary
-                    chunks.append(transcript[current_start:current_chunk_end].strip())
-                    current_start = current_chunk_end
-                else:
-                    # Single segment exceeds chunk_size, force split at paragraph
-                    search_start = current_start + chunk_size - 500
-                    search_end = min(current_start + chunk_size + 500, len(transcript))
-                    paragraph_break = transcript.rfind('\n\n', search_start, search_end)
-                    if paragraph_break > current_start:
-                        chunks.append(transcript[current_start:paragraph_break].strip())
-                        current_start = paragraph_break + 2
-                    else:
-                        # No paragraph break, split at chunk_size
-                        chunks.append(transcript[current_start:current_start + chunk_size].strip())
-                        current_start = current_start + chunk_size
+    def flush() -> None:
+        nonlocal current, current_size
+        if current:
+            chunks.append(joiner.join(current))
+            current = []
+            current_size = 0
 
-            current_chunk_end = segment_end
+    for seg in segments:
+        # If a single turn (monologue/lecture) is force-split below, its
+        # continuation pieces would start unlabeled and the editor would invent a
+        # speaker for them. Carry the turn's own **Name:** label onto each
+        # continuation piece (= one long turn becomes two same-speaker turns).
+        m = _SPEAKER_TOKEN_RE.match(seg)
+        label = m.group(0) + " " if m else ""
+        # A single segment bigger than the chunk size can't be placed whole: flush,
+        # then hard-split it repeatedly (loop re-checks size so the tail is never
+        # left oversized), preferring a \n\n break near the cut.
+        while len(seg) > size:
+            flush()
+            lo = size - CHUNK_OVERLAP
+            hi = min(size + CHUNK_OVERLAP, len(seg))
+            cut = seg.rfind('\n\n', lo, hi)
+            if cut <= 0:
+                cut = size
+            piece, rest = seg[:cut], seg[cut:].lstrip('\n')
+            if piece.strip():
+                chunks.append(piece)
+            # Prepend the label to the continuation so it isn't left unlabeled.
+            seg = label + rest if (label and rest.strip()) else rest
+        seg_size = len(seg) + sep
+        if current_size + seg_size > size and current:
+            flush()
+        current.append(seg)
+        current_size += seg_size
 
-        # Don't forget the last chunk
-        if current_start < len(transcript):
-            remaining = transcript[current_start:].strip()
-            if remaining:
-                chunks.append(remaining)
-
-    # Filter out empty chunks
-    chunks = [c for c in chunks if c.strip()]
-
-    logger.info(f"Split transcript into {len(chunks)} chunks")
-    return chunks
+    flush()
+    return [c for c in chunks if c.strip()]
 
 
 async def edit(
@@ -917,7 +920,8 @@ async def edit(
     if on_status:
         on_status("Editing raw transcript...")
 
-    chunks = _split_into_chunks(transcript)
+    chunks = _split_into_chunks(
+        transcript, CJK_CHUNK_SIZE if _is_cjk_heavy(transcript) else CHUNK_SIZE)
     logger.info(f"Split transcript into {len(chunks)} chunks for editing")
 
     if on_status:
@@ -1333,7 +1337,8 @@ async def edit_podcast(
     if on_status:
         on_status("Editing raw transcript...")
 
-    chunks = _split_into_chunks(transcript)
+    chunks = _split_into_chunks(
+        transcript, CJK_CHUNK_SIZE if _is_cjk_heavy(transcript) else CHUNK_SIZE)
     logger.info(f"Split transcript into {len(chunks)} chunks for editing")
 
     if on_status:

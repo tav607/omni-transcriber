@@ -19,7 +19,7 @@ class TranscriberConfig:
 @dataclass
 class EditorConfig:
     api_key: str
-    model: str = "gemini-3.8-flash"
+    model: str = "gemini-4-argon"
     translation_model: str = "gemini-3.8-flash"
     temperature: float = 1.0
     thinking_level: Literal["low", "medium", "high"] = "high"
@@ -230,7 +230,7 @@ def load_config() -> AppConfig:
 
     editor = EditorConfig(
         api_key=gemini_api_key,
-        model=os.getenv("EDITOR_MODEL", "gemini-3.8-flash"),
+        model=os.getenv("EDITOR_MODEL", "gemini-4-argon"),
         translation_model=os.getenv("TRANSLATION_MODEL", "gemini-3.8-flash"),
         temperature=float(os.getenv("EDITOR_TEMPERATURE", "1.0")),
         thinking_level=editor_thinking,

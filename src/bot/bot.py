@@ -135,7 +135,7 @@ async def run_bot():
     commands = [
         BotCommand(command="start", description="Start the bot"),
         BotCommand(command="help", description="Show help information"),
-        BotCommand(command="model", description="Choose AI model (Flash/Pro)"),
+        BotCommand(command="model", description="Choose AI model (Flash/Pro/Argon)"),
         BotCommand(command="translation", description="Toggle translation mode (on/off)"),
     ]
 

@@ -374,19 +374,34 @@ def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], List[i
     return chunks, durations, duration_ms
 
 
-# Overlap detection constants
+# Overlap detection for chunk merging (the skill's endpoint-anchored alignment)
 _PUNCT_RE = re.compile(
     r'[\s\u3000。，、！？：；「」『』（）【】\u201c\u201d\u2018\u2019'
     r'\u2026\u2014\u00b7\.\,\!\?\:\;\"\'\(\)\[\]\-\n\r\t>]'
 )
-# Safety cap: never skip more than this many characters (prevents data loss
-# from false-positive overlap detection)
-MAX_OVERLAP_SKIP = 1500
+_OVERLAP_PREV_CLEAN_LIMIT = 600
+_OVERLAP_NEXT_CLEAN_LIMIT = 350
+_OVERLAP_MIN_LATIN_CHARS = 40
+_OVERLAP_MIN_CJK_CHARS = 12
+_OVERLAP_MIN_IDENTITY = 0.65
+_OVERLAP_MIN_NORMALIZED_SCORE = 0.30
+_OVERLAP_TERMINAL_WINDOW = 24
+_OVERLAP_MIN_TERMINAL_IDENTITY = 0.60
+# Only unambiguous closing punctuation: straight quotes are excluded because
+# they cannot be told apart from the opening quote of the NEXT sentence.
+_OVERLAP_BOUNDARY_CHARS = ' \t\r\n。.!！?？,，;；:：”’」』)）]】'
+# An accepted skip of OVERLAP_WARNING_SKIP characters or more is logged as a
+# warning, and a skip over MAX_OVERLAP_SKIP is ignored: a duplicated seam is
+# better than deleted content.
+OVERLAP_WARNING_SKIP = 250
+MAX_OVERLAP_SKIP = 400
 
 # Speaker-label tokens (**Name:** / **Host:** / **Speaker 1:**). Adjacent audio
 # chunks label the same overlap speech independently and often differently, so
-# label text must not enter the n-gram matching or it poisons the seam detection.
+# label text must not enter the matching or it poisons the seam detection;
+# each label is matched as one sentinel character instead.
 _SPEAKER_TOKEN_RE = re.compile(r'\*\*[^*\n]{1,40}[:：]\*\*')
+_SPEAKER_BOUNDARY = '\0'
 
 # Any **Name:** turn label at the start of a line.
 _NAMED_LABEL_RE = re.compile(r'^\*\*([^*\n]+?)\s*[:：]\*\*', re.MULTILINE)
@@ -486,23 +501,38 @@ def _unify_prefix_name_labels(transcript: str) -> str:
 
 
 def _strip_for_matching_with_map(text: str) -> tuple[str, list[int]]:
-    """Strip speaker labels, whitespace, and punctuation for fuzzy overlap
-    matching. Returns (clean_text, mapping) where mapping[i] is the index in
-    `text` of clean_text[i], so match positions can be projected back."""
-    masked = _SPEAKER_TOKEN_RE.sub(lambda m: ' ' * len(m.group(0)), text)
+    """Normalize text for fuzzy matching while retaining speaker boundaries.
+
+    All speaker labels become one sentinel, so independently assigned names can
+    still align, while a transition into a new speaker cannot be mistaken for
+    ordinary text. Mapping entries project each normalized character back to
+    its source position, including characters expanded by Unicode casefolding.
+    """
     clean_chars: list[str] = []
     mapping: list[int] = []
-    for idx, ch in enumerate(masked):
-        if not _PUNCT_RE.match(ch):
-            # Adjacent chunks can come back in different scripts (one
-            # traditional, one simplified), and an unfolded seam then finds no
-            # overlap and keeps both copies of it.
-            if _zh_fold is not None and "㐀" <= ch <= "鿿":
-                simple = _zh_fold(ch, "zh-cn")
-                if len(simple) == 1:
-                    ch = simple
-            clean_chars.append(ch)
-            mapping.append(idx)
+
+    def append_text(start: int, end: int) -> None:
+        for idx in range(start, end):
+            ch = text[idx]
+            if not _PUNCT_RE.match(ch):
+                folded = ch.casefold()
+                # Adjacent chunks can come back in different scripts (one
+                # traditional, one simplified), and an unfolded seam then
+                # finds no overlap and keeps both copies of it.
+                if _zh_fold is not None and "㐀" <= ch <= "鿿":
+                    simple = _zh_fold(ch, "zh-cn")
+                    if len(simple) == 1:
+                        folded = simple
+                clean_chars.extend(folded)
+                mapping.extend([idx] * len(folded))
+
+    cursor = 0
+    for match in _SPEAKER_TOKEN_RE.finditer(text):
+        append_text(cursor, match.start())
+        clean_chars.append(_SPEAKER_BOUNDARY)
+        mapping.append(match.end() - 1)
+        cursor = match.end()
+    append_text(cursor, len(text))
     return ''.join(clean_chars), mapping
 
 
@@ -511,90 +541,144 @@ def _strip_for_matching(text: str) -> str:
     return _strip_for_matching_with_map(text)[0]
 
 
+def _is_cjk_heavy(text: str) -> bool:
+    if not text:
+        return False
+    cjk = sum('㐀' <= ch <= '鿿' for ch in text)
+    return cjk >= 8 and cjk / len(text) >= 0.4
+
+
 def _find_overlap_length(prev_text: str, next_text: str) -> int:
+    """Return the raw prefix length in next_text that overlaps prev_text's suffix.
+
+    The alignment is semi-global: it may skip any prefix of prev_text for free,
+    but it must consume a prefix of next_text and end at prev_text's final clean
+    character. This endpoint constraint prevents repeated operator scripts from
+    matching unrelated text elsewhere in the previous chunk.
     """
-    Detect how many leading characters of *next_text* duplicate content
-    from near the end of *prev_text*.
+    prev_clean = _strip_for_matching(prev_text)[-_OVERLAP_PREV_CLEAN_LIMIT:]
+    next_clean, next_map = _strip_for_matching_with_map(next_text)
+    next_clean = next_clean[:_OVERLAP_NEXT_CLEAN_LIMIT]
+    next_map = next_map[:len(next_clean)]
 
-    Uses 8-character n-gram density in a sliding window, which is robust
-    to the minor wording and punctuation differences that Gemini produces
-    when the same audio appears in two overlapping chunks.
-
-    Returns the number of characters to skip from the start of next_text
-    (0 if no overlap is detected).
-    """
-    SEARCH_LEN = 2000       # chars to inspect in each chunk
-    NGRAM_SIZE = 8           # n-gram length (8 CJK chars ≈ very specific)
-    WINDOW_SIZE = 80         # sliding-window width in stripped chars
-    WINDOW_STEP = 40         # step size
-    MATCH_THRESHOLD = 0.3    # 30 % of n-grams must hit
-
-    prev_tail = prev_text[-SEARCH_LEN:] if len(prev_text) > SEARCH_LEN else prev_text
-    next_head = next_text[:SEARCH_LEN] if len(next_text) > SEARCH_LEN else next_text
-
-    prev_clean = _strip_for_matching(prev_tail)
-    next_clean, next_map = _strip_for_matching_with_map(next_head)
-
-    if len(prev_clean) < NGRAM_SIZE or len(next_clean) < WINDOW_SIZE:
-        return 0  # not enough text for reliable n-gram matching
-
-    # Build n-gram index from previous chunk's tail
-    prev_ngrams: set[str] = {
-        prev_clean[j:j + NGRAM_SIZE]
-        for j in range(len(prev_clean) - NGRAM_SIZE + 1)
-    }
-
-    # Fix 3: Anchor check — overlap must start at the beginning of next chunk.
-    # If the first window doesn't match, there is no boundary overlap.
-    first_window = next_clean[:WINDOW_SIZE]
-    first_num = max(1, len(first_window) - NGRAM_SIZE + 1)
-    first_hits = sum(
-        1 for k in range(first_num)
-        if first_window[k:k + NGRAM_SIZE] in prev_ngrams
-    )
-    if first_hits / first_num < MATCH_THRESHOLD:
+    min_overlap = _OVERLAP_MIN_CJK_CHARS
+    if len(prev_clean) < min_overlap or len(next_clean) < min_overlap:
         return 0
 
-    # Scan next chunk's head: while n-gram density stays high, we are in
-    # the overlap region.  Once it drops, new content has begun.
-    overlap_end_clean = 0
-    for start in range(0, max(1, len(next_clean) - WINDOW_SIZE + 1), WINDOW_STEP):
-        window = next_clean[start:start + WINDOW_SIZE]
-        # Fix 1: use actual window length, not fixed WINDOW_SIZE
-        window_len = len(window)
-        num_ngrams = max(1, window_len - NGRAM_SIZE + 1)
-        hits = sum(
-            1 for k in range(num_ngrams)
-            if window[k:k + NGRAM_SIZE] in prev_ngrams
+    match_score = 2
+    edit_penalty = -2
+    rows = len(prev_clean) + 1
+    cols = len(next_clean) + 1
+    scores = [[0] * cols for _ in range(rows)]
+    moves = [bytearray(cols) for _ in range(rows)]
+
+    # Free deletion of prev_clean's prefix lets the alignment start at any
+    # suffix position. Consuming next_clean before prev_clean starts is costly.
+    for j in range(1, cols):
+        scores[0][j] = scores[0][j - 1] + edit_penalty
+        moves[0][j] = 2  # consume next character
+    for i in range(1, rows):
+        moves[i][0] = 1  # consume previous character
+
+    for i in range(1, rows):
+        prev_ch = prev_clean[i - 1]
+        for j in range(1, cols):
+            diagonal = scores[i - 1][j - 1] + (
+                match_score if prev_ch == next_clean[j - 1] else edit_penalty
+            )
+            consume_prev = scores[i - 1][j] + edit_penalty
+            consume_next = scores[i][j - 1] + edit_penalty
+            best = max(diagonal, consume_prev, consume_next)
+            scores[i][j] = best
+            moves[i][j] = (
+                0 if diagonal == best
+                else 1 if consume_prev == best
+                else 2
+            )
+
+    best_end = 0
+    best_rank: tuple[float, float, int, int] | None = None
+    last_row = rows - 1
+    for end in range(min_overlap, cols):
+        candidate = next_clean[:end]
+        required_overlap = (
+            _OVERLAP_MIN_CJK_CHARS if _is_cjk_heavy(candidate)
+            else _OVERLAP_MIN_LATIN_CHARS
         )
-        if hits / num_ngrams >= MATCH_THRESHOLD:
-            overlap_end_clean = start + window_len
-        elif overlap_end_clean > 0:
-            break  # transition from overlap → new content
+        if end < required_overlap:
+            continue
+        i = last_row
+        j = end
+        matches = 0
+        edits = 0
+        columns = 0
+        terminal_columns = 0
+        terminal_matches = 0
+        speaker_violation = False
+        while j > 0:
+            move = moves[i][j]
+            is_match = False
+            if move == 0:
+                next_ch = next_clean[j - 1]
+                is_match = prev_clean[i - 1] == next_ch
+                # A speaker boundary inside the overlap must align with a
+                # boundary on the previous side. A boundary consumed against
+                # ordinary text marks the start of a NEW turn, and deleting
+                # past it would swallow the new speaker's speech. The leading
+                # boundary of next (j == 1) is the overlap's own label and is
+                # exempt, mirroring the old label-masking behavior.
+                if next_ch == _SPEAKER_BOUNDARY and j > 1 and not is_match:
+                    speaker_violation = True
+                    break
+                if is_match:
+                    matches += 1
+                else:
+                    edits += 1
+                i -= 1
+                j -= 1
+            elif move == 1:
+                edits += 1
+                i -= 1
+            else:
+                if next_clean[j - 1] == _SPEAKER_BOUNDARY and j > 1:
+                    speaker_violation = True
+                    break
+                edits += 1
+                j -= 1
+            if terminal_columns < _OVERLAP_TERMINAL_WINDOW:
+                terminal_columns += 1
+                if is_match:
+                    terminal_matches += 1
+            columns += 1
 
-    if overlap_end_clean == 0:
+        if speaker_violation or columns == 0:
+            continue
+        identity = matches / columns
+        terminal_identity = terminal_matches / terminal_columns
+        normalized_score = scores[last_row][end] / (match_score * columns)
+        if (identity < _OVERLAP_MIN_IDENTITY
+                or terminal_identity < _OVERLAP_MIN_TERMINAL_IDENTITY
+                or normalized_score < _OVERLAP_MIN_NORMALIZED_SCORE):
+            continue
+
+        # Identity is the primary confidence signal. Score and length only
+        # break ties, so a second repeated template cannot win merely by being
+        # longer than the actual suffix-prefix overlap.
+        rank = (identity, normalized_score, scores[last_row][end], -end)
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
+            best_end = end
+
+    if best_end == 0:
         return 0
 
-    # Clamp to actual cleaned text length
-    overlap_end_clean = min(overlap_end_clean, len(next_clean))
-
-    # Project the clean-text match end back to a position in next_head via the
-    # mapping (label chars were removed from the clean text, so a simple
-    # punctuation-skipping recount would drift).
-    orig_pos = next_map[overlap_end_clean - 1] + 1
-
-    # Fix 2: Snap forward with a tight tolerance (50 chars) for a clean cut.
-    # Larger jumps risk discarding non-duplicated content.
-    SNAP_LIMIT = 50
-    for j in range(orig_pos, min(orig_pos + SNAP_LIMIT, len(next_text))):
-        if (next_text[j] == '\n'
-                and j + 1 < len(next_text)
-                and next_text[j + 1] == '\n'):
-            return j + 2
-    for j in range(orig_pos, min(orig_pos + SNAP_LIMIT, len(next_text))):
-        if next_text[j] in '。.！!？?\n':
-            return j + 1
-
+    # Mapping projects the clean-text boundary back into the original string,
+    # preserving speaker labels and punctuation. Consume only punctuation and
+    # whitespace immediately following the matched character. Do not search for
+    # a later sentence boundary, which could delete the beginning of new speech.
+    orig_pos = next_map[best_end - 1] + 1
+    while orig_pos < len(next_text) and next_text[orig_pos] in _OVERLAP_BOUNDARY_CHARS:
+        orig_pos += 1
     return orig_pos
 
 
@@ -602,9 +686,10 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
     """
     Merge multiple transcript chunks, removing duplicated content at boundaries.
 
-    Uses character n-gram density matching, which is robust to the minor
-    transcription variations that Gemini produces when the same audio segment
-    appears in overlapping chunks.
+    Each seam is an endpoint-anchored alignment of the previous chunk's tail
+    against the next chunk's head (see _find_overlap_length), which tolerates
+    the minor wording differences Gemini produces when the same audio appears
+    in two overlapping chunks.
 
     Args:
         transcripts: List of transcript strings to merge
@@ -630,7 +715,11 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
             skip = raw_skip
         if skip > 0:
             current = current[skip:].lstrip()
-            logger.info(f"Removed {skip} chars of overlapping content at chunk {i}")
+            message = f"Removed {skip} chars of overlapping content at chunk {i}"
+            if skip >= OVERLAP_WARNING_SKIP:
+                logger.warning(message)
+            else:
+                logger.info(message)
         elif raw_skip == 0:
             # A capped skip (raw_skip > limit) is a different, already-warned case;
             # only a genuine miss means the ~OVERLAP_SECONDS overlap survived.
@@ -887,7 +976,9 @@ async def transcribe(
         if len(transcripts) > 1:
             if on_status:
                 on_status("Merging transcriptions...")
-            full_text = _merge_transcriptions(transcripts)
+            # About 80ms of pure-Python alignment per seam, so run it off the
+            # event loop the bot and the Dropbox watcher share.
+            full_text = await asyncio.to_thread(_merge_transcriptions, transcripts)
         else:
             full_text = transcripts[0]
 

@@ -187,6 +187,38 @@ def _edit_separator(gap: str) -> str:
     return re.sub(r"[\s%‰°]", "", gap)
 
 
+_EDIT_BRACKETS = {"(": ")", "（": "）", "[": "]", "【": "】", "「": "」", "『": "』", "《": "》", "“": "”"}
+
+
+_EDIT_GAP_FILLERS = re.compile(
+    "[" + "".join(f for f in _CONS_FILLERS if len(f) == 1) + "]|\\b(?:"
+    + "|".join(sorted((f for f in _CONS_FILLERS if len(f) > 1), key=len, reverse=True)) + ")\\b",
+    re.IGNORECASE)
+
+
+def _edit_gap(gap: str) -> str:
+    """A raw separator without the hesitation words the tokenizer leaves in it."""
+    out = _EDIT_GAP_FILLERS.sub("", gap)
+    out = re.sub(r"([，,、；;])(?:\s*[，,、；;])+", r"\1", out)
+    # "，嗯。" leaves "，。": the stronger mark wins.
+    out = re.sub(r"[，,、]\s*(?=[。.！!？?；;])|(?<=[。.！!？?；;])\s*[，,、]", "", out)
+    return re.sub(r" {2,}", " ", out)
+
+
+def _edit_closers(text: str, gap: str) -> str:
+    """The leading closing brackets of `gap` that brackets opened in `text` need."""
+    out = ""
+    for ch in gap:
+        if ch == " ":
+            out += ch
+            continue
+        opener = next((o for o, c in _EDIT_BRACKETS.items() if c == ch), None)
+        if opener is None or (text + out).count(opener) <= (text + out).count(ch):
+            break
+        out += ch
+    return out.rstrip(" ") if out.strip() else ""
+
+
 def _edit_stutter(norms: list[str], i1: int, i2: int) -> bool:
     """The run repeats the words right before or after it ("我们我们要", "the the")."""
     run = _strip_phrases(norms[i1:i2], _EDIT_FILLERS) or norms[i1:i2]
@@ -271,13 +303,19 @@ def _restore_edit_losses(raw: str, edited: str) -> tuple[str, int]:
             end += 1
         return end
 
+    def plain(gap: str) -> bool:
+        # Punctuation and spaces only: no line break, label, timestamp or tag.
+        return "\n" not in gap and mask(gap) == gap
+
     rt, _ = _cons_tokenize(mask(raw))
     et, _ = _cons_tokenize(mask(edited))
     if not rt or not et:
         return edited, 0
     rn, en = [t[0] for t in rt], [t[0] for t in et]
-    labels = [m.start() for m in _NAMED_LABEL_RE.finditer(edited)]
-    label_ends = [m.end() for m in _NAMED_LABEL_RE.finditer(edited)]
+    # Any label, not only one opening a line: an editor can leave a turn
+    # mid-line, and a patch must never cut through one.
+    labels = [m.start() for m in _SPEAKER_TOKEN_RE.finditer(edited)]
+    label_ends = [m.end() for m in _SPEAKER_TOKEN_RE.finditer(edited)]
     patches: list[tuple[int, int, str]] = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, rn, en, autojunk=False).get_opcodes():
         if tag == "equal":
@@ -292,10 +330,38 @@ def _restore_edit_losses(raw: str, edited: str) -> tuple[str, int]:
                         and not _edit_separator(edited[et[j][2]:et[j + 1][1]])):
                     patches.append((et[j][2], et[j + 1][1], gap))
         elif tag == "delete" and not _edit_free_deletion(rn, i1, i2):
-            # Restore with the separator that preceded the run in the raw text.
-            start = rt[i1 - 1][2] if i1 else rt[i1][1]
-            at = et[j1 - 1][2] if j1 else et[0][1]
-            patches.append((at, at, raw[start:through_symbols(raw, rt[i2 - 1][2])]))
+            # Put the run back after the previous word with the raw separator
+            # before it, plus the closing brackets its own brackets need (taking
+            # the separator alone left "（大概是三十亿美元" for "（大概是三十亿美
+            # 元）"). A separator that holds a turn boundary is not copied: the
+            # run joins the next word instead, or comes back as a whole turn.
+            run_end = through_symbols(raw, rt[i2 - 1][2])
+            run = raw[rt[i1][1]:run_end]
+            gap_a = _edit_gap(raw[rt[i1 - 1][2]:rt[i1][1]]) if i1 else ""
+            gap_b = _edit_gap(raw[run_end:rt[i2][1]] if i2 < len(rt) else raw[run_end:])
+            ea = et[j1 - 1][2] if j1 else None
+            eb = et[j1][1] if j1 < len(et) else None
+            if ea is not None and plain(gap_a):
+                # After the previous word with the raw separator, less a closing
+                # bracket the edit kept right there.
+                kept = len(gap_a) - len(gap_a.lstrip("".join(_EDIT_BRACKETS.values())))
+                kept = kept if kept and edited.startswith(gap_a[:kept], ea) else 0
+                tail = _edit_closers(gap_a + run, gap_b)
+                # A restored restart "六" must not fuse with the "600" after it.
+                if (i2 < len(rt) and _edit_numeric(rn[i2 - 1]) and _edit_numeric(rn[i2])
+                        and plain(gap_b) and eb is not None and not _edit_separator(edited[ea:eb])):
+                    tail = gap_b
+                patches.append((ea + kept, ea + kept, gap_a[kept:] + run + tail))
+            elif eb is not None and plain(gap_b):
+                # The run opened a turn: keep it inside that turn.
+                patches.append((eb, eb, run + gap_b))
+            else:
+                at = ea if ea is not None else et[0][1]
+                text = (gap_a if ea is not None else "") + run + _edit_closers(gap_a + run, gap_b)
+                # A whole lost turn comes back with its label, but not with the
+                # timestamps and tags the edit removes everywhere.
+                text = _SOUND_EFFECT_RE.sub("", _TIMESTAMP_RE.sub("", text))
+                patches.append((at, at, re.sub(r"(?<=\S) {2,}(?=\S)", " ", text)))
         elif tag == "insert" and not _edit_free_insertion(en[j1:j2]):
             start, end = (et[j1 - 1][2] if j1 else et[j1][1]), through_symbols(edited, et[j2 - 1][2])
             inside = [le for ls, le in zip(labels, label_ends) if start <= ls < end]
@@ -303,12 +369,15 @@ def _restore_edit_losses(raw: str, edited: str) -> tuple[str, int]:
                 start = max(inside)
                 while start < end and edited[start] == " ":
                     start += 1
+                # and the single space after it
+                while end < len(edited) and edited[end] == " " and edited[start - 1] == " ":
+                    end += 1
             patches.append((start, end, ""))
         elif tag == "replace" and not _edit_free_replacement(rn[i1:i2], en[j1:j2]):
             start, end = et[j1][1], through_symbols(edited, et[j2 - 1][2])
             r_start, r_end = rt[i1][1], through_symbols(raw, rt[i2 - 1][2])
             if (any(start <= ls < end for ls in labels)
-                    or _NAMED_LABEL_RE.search(raw[r_start:r_end])):
+                    or _SPEAKER_TOKEN_RE.search(raw[r_start:r_end])):
                 continue
             patches.append((start, end, raw[r_start:r_end]))
     for start, end, text in sorted(patches, reverse=True):

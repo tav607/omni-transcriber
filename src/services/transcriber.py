@@ -15,6 +15,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TranscriberConfig
+from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 
@@ -807,8 +808,10 @@ async def transcribe(
         transcripts = list(results)
         logger.info(f"Transcribed {len(transcripts)} chunks")
 
-        # Step 3: Clean up each transcript
-        transcripts = [cleanup_repetitive_characters(t) for t in transcripts]
+        # Step 3: Clean up each transcript. Chunks are folded to simplified script
+        # before the merge, so a chunk that came back traditional cannot leave
+        # the transcript mixing scripts.
+        transcripts = [_to_simplified(cleanup_repetitive_characters(t)) for t in transcripts]
 
         # Step 4: Merge if multiple chunks
         if len(transcripts) > 1:

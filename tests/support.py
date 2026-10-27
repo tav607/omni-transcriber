@@ -44,11 +44,13 @@ class TranscribeRun:
         audio = workdir / "audio.mp3"
         audio.touch()
 
-        def split(audio_path, output_dir):
+        def split(audio_path, output_dir, max_duration_ms=transcriber.MAX_DURATION_MS):
             if self.chunks == 1:
-                return [audio_path], [60_000], 60_000
+                return [audio_path], [60_000], 60_000, [0]
+            # Chunks that meet in pauses: no shared audio at any seam.
             paths = [output_dir / f"chunk_{i:03d}.mp3" for i in range(self.chunks)]
-            return paths, [60_000] * self.chunks, 60_000 * self.chunks
+            starts = [i * 60_000 for i in range(self.chunks)]
+            return paths, [60_000] * self.chunks, 60_000 * self.chunks, starts
 
         async def upload(client, file_path, mime_type):
             return self.upload(Path(file_path))

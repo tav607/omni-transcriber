@@ -15,7 +15,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TranscriberConfig
-from ..utils.chinese import _to_simplified
+from ..utils.chinese import _to_simplified, _zh_fold
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 
@@ -441,6 +441,13 @@ def _strip_for_matching_with_map(text: str) -> tuple[str, list[int]]:
     mapping: list[int] = []
     for idx, ch in enumerate(masked):
         if not _PUNCT_RE.match(ch):
+            # Adjacent chunks can come back in different scripts (one
+            # traditional, one simplified), and an unfolded seam then finds no
+            # overlap and keeps both copies of it.
+            if _zh_fold is not None and "㐀" <= ch <= "鿿":
+                simple = _zh_fold(ch, "zh-cn")
+                if len(simple) == 1:
+                    ch = simple
             clean_chars.append(ch)
             mapping.append(idx)
     return ''.join(clean_chars), mapping

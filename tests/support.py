@@ -1,6 +1,7 @@
 """Fakes that run the transcription and edit pipelines without ffmpeg or Gemini."""
 
 import asyncio
+import json
 import shutil
 import tempfile
 from contextlib import ExitStack
@@ -80,16 +81,29 @@ class TranscribeRun:
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _text_response(text: str) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(candidates=[types.Candidate(
+        content=types.Content(role="model", parts=[types.Part.from_text(text=text)]))])
+
+
+def _editor_gemini(edit_chunk, metadata: dict):
+    """A stand-in for editor._gemini_generate, so the real chunk editors,
+    metadata parsing and glossary step run: schema calls get the glossary or
+    the metadata JSON, edit calls get edit_chunk(raw_chunk)."""
+    async def generate(client, model, contents, *, system=None, schema=None, **kwargs):
+        if schema is not None:
+            if system == editor.GLOSSARY_PROMPT:
+                return _text_response('{"terms": []}')
+            return _text_response(json.dumps(metadata, ensure_ascii=False))
+        # "## Raw Transcript Chunk (i/n)", a blank line, then the chunk itself.
+        chunk = contents.split("## Raw Transcript Chunk", 1)[1].split("\n", 2)[2]
+        return _text_response(edit_chunk(chunk))
+    return generate
+
+
 def run_edit(raw: str, edit_chunk, metadata: dict) -> str:
     """edit() with each edit call answered by edit_chunk(raw_chunk)."""
-    async def edit_raw_chunk(client, chunk, *args, **kwargs):
-        return edit_chunk(chunk)
-
-    async def generate_metadata(*args, **kwargs):
-        return dict(metadata)
-
-    with mock.patch.object(editor, "_edit_raw_chunk", edit_raw_chunk), \
-            mock.patch.object(editor, "_generate_normal_metadata", generate_metadata), \
+    with mock.patch.object(editor, "_gemini_generate", _editor_gemini(edit_chunk, metadata)), \
             mock.patch.object(editor, "_get_client", lambda key: object()):
         return asyncio.run(editor.edit(raw, EditorConfig(api_key="test-key", model=MODEL)))
 
@@ -97,14 +111,7 @@ def run_edit(raw: str, edit_chunk, metadata: dict) -> str:
 def run_edit_podcast(raw: str, edit_chunk, metadata: dict,
                      episode: "editor.PodcastEpisodeMetadata | None" = None):
     """edit_podcast() with each edit call answered by edit_chunk(raw_chunk)."""
-    async def edit_podcast_raw_chunk(client, chunk, *args, **kwargs):
-        return edit_chunk(chunk)
-
-    async def generate_metadata(*args, **kwargs):
-        return dict(metadata)
-
-    with mock.patch.object(editor, "_edit_podcast_raw_chunk", edit_podcast_raw_chunk), \
-            mock.patch.object(editor, "_generate_podcast_metadata", generate_metadata), \
+    with mock.patch.object(editor, "_gemini_generate", _editor_gemini(edit_chunk, metadata)), \
             mock.patch.object(editor, "_get_client", lambda key: object()):
         return asyncio.run(editor.edit_podcast(
             raw, EditorConfig(api_key="test-key", model=MODEL), metadata=episode))

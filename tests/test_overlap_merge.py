@@ -238,6 +238,30 @@ class OverlapMergeTests(unittest.TestCase):
         self.assertTrue(any("Removed" in message for message in captured.output))
 
 
+    def test_seam_cut_in_a_pause_is_joined_without_alignment(self):
+        prev = "**Host:** We moved the workload to Pinecone last year."
+        nxt = "**Host:** We moved the workload to Pinecone last year, and costs fell."
+        with unittest.mock.patch.object(transcriber, "_find_overlap_length") as align:
+            merged = transcriber._merge_transcriptions([prev, nxt], [0.0])
+        align.assert_not_called()
+        self.assertEqual(merged, prev + "\n\n" + nxt)
+
+    def test_overlap_seams_still_align(self):
+        with unittest.mock.patch.object(transcriber, "_find_overlap_length", return_value=5) as align:
+            merged = transcriber._merge_transcriptions(["previous", "dupe new"], [10.0])
+        align.assert_called_once()
+        self.assertEqual(merged, "previous\n\nnew")
+
+    def test_sessions_without_seam_overlaps_align_every_seam(self):
+        with unittest.mock.patch.object(transcriber, "_find_overlap_length", return_value=0) as align:
+            transcriber._merge_transcriptions(["a", "b", "c"])
+        self.assertEqual(align.call_count, 2)
+
+    def test_seam_overlaps_from_the_split(self):
+        self.assertEqual(transcriber._seam_overlaps_s([15_000, 15_000, 9_000], [0, 12_500, 17_500]),
+                         [2.5, 10.0])
+
+
 class ScriptFoldingTests(unittest.TestCase):
     PREVIOUS = "前面的讨论。\n\n**专家:** 這個問題會對整體營運產生壓力，貿易戰導致關稅與匯率變動難以預測。"
     CURRENT = ("**专家:** 这个问题会对整体营运产生压力，贸易战导致关税与汇率变动难以预测。"

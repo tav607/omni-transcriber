@@ -1,11 +1,14 @@
 """Audio transcription using Gemini API with chunking support."""
 
+import array
 import asyncio
 import re
 import logging
+import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +48,33 @@ MAX_DURATION_MINUTES = 15
 OVERLAP_SECONDS = 10
 MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
+
+# Chunks are cut in a pause (backported from the transcribe skill, which
+# measured the numbers below). Within the minute before each 15-minute mark the
+# longest stretch of near-silence wins and the cut goes through its middle, so
+# no word is split and no audio is shared. Only a minute without a pause of
+# SPLIT_MIN_PAUSE_SECONDS falls back to cutting at the mark with
+# OVERLAP_SECONDS of shared audio, for the merge to align as before. Shared
+# audio is transcribed twice, and when the two chunks word it differently the
+# merge cannot align it: in five saved calls (2026-10-27) that left a duplicate
+# at 3 of 15 seams, all in expert calls (a question cut off in one chunk and
+# whole in the next; "感谢" against "周末愉快"). A chunk that opens mid-sentence
+# also invites an invented opening: both Gemini passes of one Dewu chunk began
+# with a sentence nobody said ("这两个满打满算也就几十万吧", "这两、两个场景我们
+# 就都讲了"; the skill's MAI transcript and a pause-cut run of the same audio
+# have neither), and with that seam unaligned it stayed in the transcript.
+# Every one of the 15 seams had a pause of 0.6 s or more in the minute before
+# the mark; re-run with pause cuts, the Dewu and Maybank calls cut all 7 seams
+# in a pause and kept no duplicate.
+SPLIT_SEARCH_SECONDS = 60
+SPLIT_MIN_PAUSE_SECONDS = 0.3
+# Near-silence is judged against the stretch itself, since a phone call and a
+# far-field meeting sit 30 dB apart: 20 ms frames quieter than the 5th
+# percentile plus 30% of the way to the 95th. A fixed -35 dB took a far-field
+# meeting's quiet speech for a 30-second pause.
+_PAUSE_RATE = 8000
+_PAUSE_FRAME = 160
+_PAUSE_FRAME_S = _PAUSE_FRAME / _PAUSE_RATE
 
 # Timeout for transcription API calls (15 minutes per chunk, generous for long audio)
 TRANSCRIPTION_TIMEOUT_SECONDS = 15 * 60
@@ -305,73 +335,117 @@ def _get_audio_duration(audio_path: Path) -> int:
     return int(duration_seconds * 1000)
 
 
-def _split_audio(audio_path: Path, output_dir: Path) -> tuple[List[Path], List[int], int]:
-    """
-    Split audio file into chunks using ffmpeg with stream copy (no re-encoding).
+def _frame_levels_db(audio_path: Path, start_s: float, length_s: float) -> list[float]:
+    """Loudness of each 20 ms frame of a stretch of audio, in dBFS ([] on failure)."""
+    cmd = [
+        "ffmpeg", "-v", "error", "-ss", f"{start_s:.3f}", "-t", f"{length_s:.3f}",
+        "-i", str(audio_path), "-ac", "1", "-ar", str(_PAUSE_RATE), "-f", "s16le", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        return []
+    samples = array.array("h")
+    samples.frombytes(result.stdout[: len(result.stdout) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    levels = []
+    for i in range(0, len(samples) - _PAUSE_FRAME + 1, _PAUSE_FRAME):
+        power = sum(x * x for x in samples[i:i + _PAUSE_FRAME]) / _PAUSE_FRAME
+        levels.append(10 * math.log10(power / 32768 ** 2) if power else -120.0)
+    return levels
 
-    Args:
-        audio_path: Path to original audio file
-        output_dir: Directory to save audio chunks
 
-    Returns:
-        Tuple of (chunk paths, per-chunk durations in ms, total duration in ms).
-        Per-chunk durations come from the split arithmetic, so no extra ffprobe
-        call is needed. If the audio is shorter than the threshold, returns
-        ([original_path], [duration], duration).
-    """
-    # Get duration first
+def _pause_cut(audio_path: Path, start_s: float, length_s: float) -> float | None:
+    """Seconds into the file at the middle of the longest pause in a stretch of
+    audio, or None when it has no pause of SPLIT_MIN_PAUSE_SECONDS."""
+    levels = _frame_levels_db(audio_path, start_s, length_s)
+    if len(levels) < 20:
+        return None
+    ordered = sorted(levels)
+    floor, loud = ordered[len(ordered) // 20], ordered[len(ordered) * 19 // 20]
+    threshold = floor + 0.3 * (loud - floor)
+    best_len, best_first, run_first = 0, 0, None
+    for i, level in enumerate(levels + [math.inf]):
+        if level < threshold:
+            if run_first is None:
+                run_first = i
+        elif run_first is not None:
+            if i - run_first > best_len:
+                best_len, best_first = i - run_first, run_first
+            run_first = None
+    if best_len * _PAUSE_FRAME_S < SPLIT_MIN_PAUSE_SECONDS:
+        return None
+    return start_s + (best_first + best_len / 2) * _PAUSE_FRAME_S
+
+
+def _split_audio(
+    audio_path: Path,
+    output_dir: Path,
+    max_duration_ms: int = MAX_DURATION_MS,
+) -> tuple[list[Path], list[int], int, list[int]]:
+    """Split audio into chunks using ffmpeg stream copy if needed.
+
+    Returns (chunk_paths, chunk_durations_ms, total_duration_ms, chunk_starts_ms);
+    durations and starts come from the split arithmetic itself, so no extra
+    ffprobe calls are needed. Each cut goes through a pause where one is found
+    (no shared audio); otherwise the next chunk starts OVERLAP_MS before the cut.
+    max_duration_ms is a parameter so tests (and the skill's RECITATION
+    fallback, which omni does not have) can split at other lengths."""
     duration_ms = _get_audio_duration(audio_path)
+    if duration_ms <= max_duration_ms:
+        return [audio_path], [duration_ms], duration_ms, [0]
 
-    if duration_ms <= MAX_DURATION_MS:
-        return [audio_path], [duration_ms], duration_ms
-
-    # Defensive check
-    if OVERLAP_MS >= MAX_DURATION_MS:
-        raise ValueError(
-            f"OVERLAP_MS ({OVERLAP_MS}) must be less than MAX_DURATION_MS ({MAX_DURATION_MS})."
-        )
+    spans: list[tuple[int, int]] = []
+    start_ms = 0
+    in_pauses = 0
+    while True:
+        mark_ms = start_ms + max_duration_ms
+        if mark_ms >= duration_ms:
+            spans.append((start_ms, duration_ms))
+            break
+        search_s = min(SPLIT_SEARCH_SECONDS, max_duration_ms / 2000)
+        cut = _pause_cut(audio_path, mark_ms / 1000 - search_s, search_s)
+        if cut is not None:
+            spans.append((start_ms, int(cut * 1000)))
+            start_ms = int(cut * 1000)
+            in_pauses += 1
+        else:
+            spans.append((start_ms, mark_ms))
+            start_ms = mark_ms - OVERLAP_MS
 
     chunks = []
-    durations: List[int] = []
-    chunk_index = 0
-    start_ms = 0
+    durations: list[int] = []
+    starts: list[int] = []
     ext = audio_path.suffix
-
-    while start_ms < duration_ms:
-        end_ms = min(start_ms + MAX_DURATION_MS, duration_ms)
+    for chunk_index, (start_ms, end_ms) in enumerate(spans):
         chunk_duration_ms = end_ms - start_ms
-
         chunk_path = output_dir / f"chunk_{chunk_index:03d}{ext}"
 
-        # Use ffmpeg with stream copy (very fast, no re-encoding)
         cmd = [
-            "ffmpeg",
-            "-y",  # Overwrite output
-            "-ss", str(start_ms / 1000),  # Start time in seconds
+            "ffmpeg", "-y",
+            "-ss", str(start_ms / 1000),
             "-i", str(audio_path),
-            "-t", str(chunk_duration_ms / 1000),  # Duration in seconds
-            "-c", "copy",  # Stream copy, no re-encoding
+            "-t", str(chunk_duration_ms / 1000),
+            "-c", "copy",
             "-avoid_negative_ts", "1",
             "--", str(chunk_path),
         ]
-
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg split failed: {result.stderr}")
 
         chunks.append(chunk_path)
         durations.append(chunk_duration_ms)
-        chunk_index += 1
+        starts.append(start_ms)
 
-        # If this chunk reached the end, we're done
-        if end_ms >= duration_ms:
-            break
+    logger.info(f"Split audio into {len(chunks)} chunks of ~{max_duration_ms // 60000} minutes, "
+                f"{in_pauses} of {len(chunks) - 1} cut(s) in a pause")
+    return chunks, durations, duration_ms, starts
 
-        # Next chunk starts OVERLAP_SECONDS before the end of current chunk
-        start_ms = end_ms - OVERLAP_MS
 
-    logger.info(f"Split audio into {len(chunks)} chunks of ~{MAX_DURATION_MINUTES} minutes each")
-    return chunks, durations, duration_ms
+def _seam_overlaps_s(durations_ms: list[int], starts_ms: list[int]) -> list[float]:
+    """Seconds of audio each pair of neighbouring chunks shares (0 for a pause cut)."""
+    return [round((s + d - n) / 1000, 3) for s, d, n in zip(starts_ms, durations_ms, starts_ms[1:])]
 
 
 # Overlap detection for chunk merging (the skill's endpoint-anchored alignment)
@@ -682,17 +756,20 @@ def _find_overlap_length(prev_text: str, next_text: str) -> int:
     return orig_pos
 
 
-def _merge_transcriptions(transcripts: List[str]) -> str:
+def _merge_transcriptions(transcripts: list[str], seam_overlaps_s: list[float] | None = None) -> str:
     """
     Merge multiple transcript chunks, removing duplicated content at boundaries.
 
-    Each seam is an endpoint-anchored alignment of the previous chunk's tail
-    against the next chunk's head (see _find_overlap_length), which tolerates
-    the minor wording differences Gemini produces when the same audio appears
-    in two overlapping chunks.
+    seam_overlaps_s gives each seam's shared audio (see _seam_overlaps_s): a
+    seam cut in a pause (0) shares nothing and is joined as is. Every other
+    seam, and all of them when seam_overlaps_s is None, is an endpoint-anchored
+    alignment of the previous chunk's tail against the next chunk's head (see
+    _find_overlap_length), which tolerates the minor wording differences Gemini
+    produces when the same audio appears in two overlapping chunks.
 
     Args:
         transcripts: List of transcript strings to merge
+        seam_overlaps_s: Seconds of audio each pair of neighbouring chunks shares
 
     Returns:
         Merged transcript string
@@ -704,6 +781,9 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
 
     for i in range(1, len(transcripts)):
         current = transcripts[i]
+        if seam_overlaps_s is not None and i - 1 < len(seam_overlaps_s) and not seam_overlaps_s[i - 1]:
+            merged = merged + "\n\n" + current
+            continue
         raw_skip = _find_overlap_length(merged, current)
         if raw_skip > MAX_OVERLAP_SKIP:
             logger.warning(
@@ -775,10 +855,15 @@ async def transcribe(
     uploaded_files: List[types.File] = []
 
     try:
-        # Split audio if needed (uses ffmpeg, very fast)
+        # Split audio if needed (ffmpeg stream copy, cut in pauses)
         temp_dir = Path(tempfile.mkdtemp(prefix="omni_chunks_"))
-        chunk_paths, chunk_durations_ms, duration_ms = _split_audio(audio_path_obj, temp_dir)
+        # The pause search decodes a minute of audio before each cut, so the
+        # split runs off the event loop the bot and the Dropbox watcher share.
+        chunk_paths, chunk_durations_ms, duration_ms, chunk_starts_ms = await asyncio.to_thread(
+            _split_audio, audio_path_obj, temp_dir
+        )
         chunk_durations_s = [d / 1000 for d in chunk_durations_ms]
+        seam_overlaps_s = _seam_overlaps_s(chunk_durations_ms, chunk_starts_ms)
         duration_minutes = duration_ms // 60000
         needs_splitting = len(chunk_paths) > 1
 
@@ -978,7 +1063,7 @@ async def transcribe(
                 on_status("Merging transcriptions...")
             # About 80ms of pure-Python alignment per seam, so run it off the
             # event loop the bot and the Dropbox watcher share.
-            full_text = await asyncio.to_thread(_merge_transcriptions, transcripts)
+            full_text = await asyncio.to_thread(_merge_transcriptions, transcripts, seam_overlaps_s)
         else:
             full_text = transcripts[0]
 

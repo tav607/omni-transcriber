@@ -29,7 +29,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
    **or** Xiaoyuzhou URL → `services/xiaoyuzhou_parser.py` fetches audio URL via RSSHub → `services/downloader.py` downloads
    **or** Audio file upload → downloaded from Telegram
 2. **Transcription**: `services/transcriber.py` uploads audio to Gemini File API, transcribes with Gemini model; each chunk is folded to simplified Chinese (zhconv, text with Japanese kana left alone) before the chunks are merged
-3. **Editing**: `services/editor.py` formats raw transcript into structured Markdown (Chinese summary + original language transcript); the final Markdown and title are folded to simplified Chinese again, since metadata and translation calls can answer in traditional script
+3. **Editing**: `services/editor.py` formats raw transcript into structured Markdown (Chinese summary + original language transcript); every edited chunk first goes through the edit fidelity guard (`services/edit_guard.py`), which aligns it against its raw input and puts back whatever the editor dropped or reworded beyond cleanup (fillers, stutters, restated false starts, small function-word trims and formatting variants survive; numbers and negations never count as cleanup); the final Markdown and title are folded to simplified Chinese again, since metadata and translation calls can answer in traditional script
 4. **Output**: `services/pdf_generator.py` converts Markdown to PDF via WeasyPrint
 
 ### Key Modules
@@ -41,6 +41,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 - `src/services/downloader.py` - Audio download via yt-dlp (YouTube/Bilibili/direct URLs)
 - `src/services/rss_parser.py` - Apple Podcasts RSS feed lookup and episode matching (iTunes ID + slug-based title match)
 - `src/services/xiaoyuzhou_parser.py` - Xiaoyuzhou podcast metadata extraction via RSSHub
+- `src/services/edit_guard.py` - Edit fidelity guard (`_restore_edit_losses`), backported from the transcribe skill; runs in a worker thread because a 32k-character Chinese chunk takes about 1.5s to align
 - `src/utils/gemini.py` - Process-wide Gemini concurrency gate and response checks (truncation, served-model reroutes)
 - `src/utils/chinese.py` - Simplified/traditional folding (`_to_simplified`, optional zhconv import that degrades to a no-op)
 - `src/utils/retry.py` - Retry wrapper for API calls

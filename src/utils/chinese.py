@@ -10,6 +10,11 @@ try:
     from zhconv import convert as _zh_fold
 except ImportError:
     _zh_fold = None
+else:
+    # zhconv builds its conversion table on first use, without a lock, and the
+    # edit guard folds tokens from worker threads; build it once here (about
+    # 50ms) so concurrent callers only ever read it.
+    _zh_fold("", "zh-cn")
 
 _KANA_RE = re.compile(r"[぀-ヿ]")
 

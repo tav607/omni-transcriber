@@ -39,15 +39,29 @@ settings_store.init()
 MODELS = {
     "flash": "gemini-3.8-flash",
     "pro": "gemini-pro-latest",
+    "argon": "gemini-4-argon",
+}
+# Which choices /model offers per component: Argon edits only (see below).
+MODEL_CHOICES = {
+    "transcriber": ("flash", "pro"),
+    "editor": ("flash", "pro", "argon"),
 }
 
-# Default models. Measured against the CoreWeave Q2 2026 corrected transcript
-# and Dwarkesh's published transcript on 2026-08-14, 3.7-flash matches 3.1-pro
-# on word error rate and beats it on entity recall, while 1 of 5 pro runs
-# fabricated 146 words of plausible financial guidance that was never spoken.
-# Chats that picked a model explicitly keep their stored choice.
+# Default models. Transcription: measured against the CoreWeave Q2 2026
+# corrected transcript and Dwarkesh's published transcript on 2026-08-14,
+# 3.7-flash matches 3.1-pro on word error rate and beats it on entity recall,
+# while 1 of 5 pro runs fabricated 146 words of plausible financial guidance
+# that was never spoken. Editing (and the summary/metadata step, which uses the
+# editor model) runs on Gemini 4 Argon: re-editing three October 2026 expert
+# calls in the transcribe skill, Argon lost 2-5% of the distinct content words
+# before the fidelity guard, where gemini-3.8-flash lost 4-15%, at about the
+# same cost per call ($0.17-0.33 against $0.14-0.19, at Argon's introductory
+# $2/$10 per 1M tokens, which doubles on 2026-12-01; Argon thinks far less).
+# Transcription stays on 3.8: Argon costs about twice as much per hour of audio
+# for no measured gain, so /model offers Argon for the editor only. Chats that
+# picked a model explicitly keep their stored choice.
 DEFAULT_TRANSCRIBER_MODEL = "flash"
-DEFAULT_EDITOR_MODEL = "flash"
+DEFAULT_EDITOR_MODEL = "argon"
 
 # Supported audio MIME types
 AUDIO_MIME_TYPES = [
@@ -215,7 +229,7 @@ async def cmd_help(message: Message):
         "*Audio Files:*\n"
         "Send me an audio file (mp3, m4a, wav, webm, etc.)\n\n"
         "*Settings:*\n"
-        "`/model` - Choose AI model (Flash/Pro)\n"
+        "`/model` - Choose AI model (Flash/Pro; the editor also offers Argon, its default)\n"
         "`/translation` - Toggle inline Chinese translation\n\n"
         "*Podcast mode:*\n"
         "Interview / talk-show videos are auto-detected and formatted with "
@@ -339,6 +353,10 @@ async def cmd_model(message: Message):
                 text=f"{'✓ ' if current_editor == 'pro' else ''}Pro",
                 callback_data="model_editor_pro",
             ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_editor == 'argon' else ''}Argon",
+                callback_data="model_editor_argon",
+            ),
         ],
     ]
 
@@ -373,7 +391,9 @@ async def model_callback(callback: CallbackQuery):
         return
 
     _, component, model = parts
-    if component not in ("transcriber", "editor") or model not in ("flash", "pro"):
+    # Argon is offered for the editor only; a crafted model_transcriber_argon
+    # is ignored like any other unknown choice.
+    if model not in MODEL_CHOICES.get(component, ()):
         return
 
     # Update settings

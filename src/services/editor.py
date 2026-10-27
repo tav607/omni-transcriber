@@ -14,6 +14,7 @@ from ..config import EditorConfig
 from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
+from .edit_guard import _restore_edit_losses
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,29 @@ class VideoEditorMetadata:
     description: str = ""
     upload_date: str = ""
     webpage_url: str = ""
+
+
+async def _guard_edit(raw: str, edited: str, index: int, restored_spans: List[int]) -> str:
+    """Run the edit fidelity guard on one edited chunk (see edit_guard.py).
+
+    In a worker thread: a full 32k-character Chinese chunk takes about 1.5s of
+    pure-Python alignment, and the bot and the Dropbox watcher share this
+    event loop.
+    """
+    edited, restored = await asyncio.to_thread(_restore_edit_losses, raw, edited)
+    restored_spans.append(restored)
+    if restored:
+        logger.info(
+            f"Edit chunk {index + 1}: put back {restored} span(s) the editor dropped or reworded"
+        )
+    return edited
+
+
+def _log_edit_guard_total(restored_spans: List[int]) -> None:
+    logger.info(
+        f"Edit guard: put back {sum(restored_spans)} span(s) from the raw transcript "
+        f"across {len(restored_spans)} edited chunk(s)"
+    )
 
 
 def _has_meaningful_content(chunk: str) -> bool:
@@ -904,10 +928,12 @@ async def edit(
     )
 
     # Process all chunks in parallel (bounded by the shared semaphore)
+    restored_spans: List[int] = []
+
     async def edit_chunk(chunk: str, index: int) -> str:
-        async with _gemini_sem:
-            try:
-                return await with_model_fallback(
+        try:
+            async with _gemini_sem:
+                edited = await with_model_fallback(
                     lambda _m: lambda: _edit_raw_chunk(
                         client,
                         chunk,
@@ -923,14 +949,18 @@ async def edit(
                     config.model,
                     context=f"Editing chunk {index + 1}",
                 )
-            except Exception as e:
-                # Last-resort fallback AFTER retries: an unedited chunk beats a
-                # dead run or dropped content.
-                logger.warning(f"Edit chunk {index + 1} failed after retries; keeping the raw chunk: {e}")
-                return chunk
+            # Before anything else reads the edit: put back what the editor
+            # dropped or reworded beyond cleanup.
+            return await _guard_edit(chunk, edited, index, restored_spans)
+        except Exception as e:
+            # Last-resort fallback AFTER retries: an unedited chunk beats a
+            # dead run or dropped content.
+            logger.warning(f"Edit chunk {index + 1} failed after retries; keeping the raw chunk: {e}")
+            return chunk
 
     edited_chunks = await asyncio.gather(*[edit_chunk(c, i) for i, c in enumerate(chunks)])
     logger.info(f"Edited {len(edited_chunks)} chunks")
+    _log_edit_guard_total(restored_spans)
 
     # Combine edited chunks
     edited_transcript = "\n\n".join(edited_chunks)
@@ -1311,9 +1341,11 @@ async def edit_podcast(
     )
 
     # Process all chunks in parallel
+    restored_spans: List[int] = []
+
     async def edit_chunk(chunk: str, index: int) -> str:
         async with _gemini_sem:
-            return await with_model_fallback(
+            edited = await with_model_fallback(
                 lambda _m: lambda: _edit_podcast_raw_chunk(
                     client,
                     chunk,
@@ -1328,9 +1360,15 @@ async def edit_podcast(
                 config.model,
                 context=f"Editing chunk {index + 1}",
             )
+        if not edited:
+            return edited  # skipped by _has_meaningful_content, filtered out below
+        # Before anything else reads the edit: put back what the editor dropped
+        # or reworded beyond cleanup.
+        return await _guard_edit(chunk, edited, index, restored_spans)
 
     edit_tasks = [edit_chunk(chunk, i) for i, chunk in enumerate(chunks)]
     results = await asyncio.gather(*edit_tasks, return_exceptions=True)
+    _log_edit_guard_total(restored_spans)
 
     # Handle results, using original chunk if editing failed
     edited_chunks = []

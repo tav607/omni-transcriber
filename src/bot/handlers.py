@@ -31,9 +31,13 @@ settings_store.init()
 
 # Model options. "flash" is pinned to a version rather than the moving alias:
 # gemini-flash-latest silently repointed to 3.7-flash on release day, which put
-# the pipeline on an untested model without anyone choosing to.
+# the pipeline on an untested model without anyone choosing to. A pin can go
+# stale too: since 2026-10-08 Google serves requests for gemini-3.7-flash with
+# gemini-3.8-flash (the response's model_version says so), so "flash" names
+# the model that actually answers. Chat requests resolve through this table
+# and override TRANSCRIBER_MODEL / EDITOR_MODEL; the Dropbox watcher uses those.
 MODELS = {
-    "flash": "gemini-3.7-flash",
+    "flash": "gemini-3.8-flash",
     "pro": "gemini-pro-latest",
 }
 

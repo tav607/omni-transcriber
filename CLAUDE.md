@@ -45,7 +45,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 
 All config via environment variables (see `.env.example`). Key settings:
 - `GEMINI_API_KEY` / `TELEGRAM_BOT_TOKEN` - Required
-- `TRANSCRIBER_MODEL` / `EDITOR_MODEL` / `TRANSLATION_MODEL` - Gemini models (default: gemini-3.7-flash for all three). All three are pinned to a version on purpose: `gemini-flash-latest` repointed to 3.7-flash on its release day, so an alias here would swap the model without anyone deciding to.
+- `TRANSCRIBER_MODEL` / `EDITOR_MODEL` / `TRANSLATION_MODEL` - Gemini models (default: gemini-3.8-flash for all three). All three are pinned to a version on purpose: `gemini-flash-latest` repointed to 3.7-flash on its release day, so an alias here would swap the model without anyone deciding to. A pin can still go stale: since 2026-10-08 Google answers `gemini-3.7-flash` requests with 3.8-flash, visible only in the response's `model_version`. Telegram requests ignore `TRANSCRIBER_MODEL` / `EDITOR_MODEL` and resolve the chat's flash/pro choice through `MODELS` in `src/bot/handlers.py`; only the Dropbox watcher reads those two variables. A model change needs both places.
 - `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - Gemini native thinking_level: "low", "medium", or "high" (both default "high"; metadata generation is always "high", translation/glossary always "low")
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
 - `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support

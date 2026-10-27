@@ -15,7 +15,7 @@ from google import genai
 from google.genai import types
 
 from ..config import TranscriberConfig
-from ..utils.gemini import is_truncated, _gemini_sem
+from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 
 logger = logging.getLogger(__name__)
@@ -947,6 +947,7 @@ async def _transcribe_audio(
             f"Transcription timed out after {TRANSCRIPTION_TIMEOUT_SECONDS // 60} minutes. "
             "The audio chunk may be too long or the API is unresponsive."
         )
+    _check_served_model(model, getattr(response, "model_version", None))
 
     # Validate response
     text = response.text

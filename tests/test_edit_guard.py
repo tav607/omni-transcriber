@@ -1,4 +1,4 @@
-"""Edit fidelity guard. The first 14 tests are ported verbatim from the
+"""Edit fidelity guard. The first 24 tests are ported verbatim from the
 transcribe skill's test_edit_guard.py; the rest check that both edit paths
 run the guard."""
 
@@ -102,6 +102,56 @@ class LossesAreRestoredTests(unittest.TestCase):
         out, n = _restore_edit_losses(raw, edited)
         self.assertEqual(out, raw)
         self.assertEqual(n, 2)
+
+
+class RestoredSpanShapeTests(unittest.TestCase):
+    """What comes back keeps its brackets, its turn and nothing the edit removes on purpose."""
+
+    def test_closing_bracket_comes_back(self):
+        raw = "**专家:** 我们的营收（大概是三十亿美元）在去年翻倍了。"
+        self.assertEqual(guard(raw, "**专家:** 我们的营收在去年翻倍了。"), raw)
+        raw = "**Host:** And then [inaudible] we moved on."
+        self.assertEqual(guard(raw, "**Host:** And then we moved on."), raw)
+
+    def test_kept_closing_bracket_is_not_doubled(self):
+        raw = "**专家:** 我们（主要是）讨论了价格。"
+        self.assertEqual(guard(raw, "**专家:** 我们（主要是）。"), raw)
+
+    def test_bracket_at_the_end_of_the_text(self):
+        raw = "**Host:** We grew 12% last year (mostly in Asia)."
+        self.assertEqual(guard(raw, "**Host:** We grew 12% last year."), raw)
+
+    def test_label_in_the_middle_of_a_line_survives(self):
+        raw = "**BDA:** 好的。 **专家:** 我们用的是自建的Milvus。"
+        edited = "**BDA:** 好的。 **专家:** 早期我们用的是自建的Milvus。"
+        self.assertEqual(guard(raw, edited), raw)
+
+    def test_words_lost_at_a_turn_start_stay_in_that_turn(self):
+        raw = "**BDA:** 好的，上一句。\n\n**专家:** 我们在新加坡的数据，下一句是这样。"
+        edited = "**BDA:** 好的，上一句。\n\n**专家:** 下一句是这样。"
+        self.assertEqual(guard(raw, edited), raw)
+
+    def test_a_lost_turn_comes_back_with_its_label(self):
+        raw = "**BDA:** 上一句。\n\n**专家:** 我们用的是自建集群。\n\n**BDA:** 下一句。"
+        self.assertEqual(guard(raw, "**BDA:** 上一句。\n\n**BDA:** 下一句。"), raw)
+
+    def test_restored_restart_numeral_keeps_its_separator(self):
+        raw = "**专家:** 大概加起来可能得六……600多左右了吧。"
+        self.assertEqual(guard(raw, "**专家:** 大概加起来可能得600多左右了吧。"), raw)
+
+    def test_restored_text_leaves_fillers_out(self):
+        raw = "**专家:** 我们在新加坡，嗯。我觉得数据还是要放在本地。"
+        edited = "**专家:** 我觉得数据还是要放在本地。"
+        self.assertEqual(guard(raw, edited), "**专家:** 我们在新加坡。我觉得数据还是要放在本地。")
+
+    def test_english_filler_in_a_restored_gap_leaves_one_space(self):
+        raw = "**Host:** We built the platform, and uh we installed it in Asia."
+        self.assertNotIn("  ", guard(raw, "**Host:** We built the platform, and installed it in Asia."))
+
+    def test_restored_text_leaves_timestamps_out(self):
+        raw = "**00:01** **Host:** Revenue grew. **00:05** Margins fell 3 points."
+        self.assertEqual(guard(raw, "**Host:** Revenue grew."), "**Host:** Revenue grew. Margins fell 3 points.")
+
 
 
 RAW = ("**专家:** 可以。那我就不以我离职之后来说了，就以我按那个来说。"

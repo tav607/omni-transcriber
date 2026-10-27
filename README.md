@@ -11,7 +11,8 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 - Auto-detect podcast/interview videos and format them with takeaways, Q&A, and
   highlights (override per message with `#podcast` / `#nopodcast`)
 - Output as both Markdown and PDF files
-- Chinese summary with original language transcript preservation
+- Chinese summary with original language transcript preservation (Chinese text is
+  normalized to Simplified script; Japanese is left alone)
 - User settings via Telegram commands:
   - `/model` - Choose AI model (Flash/Pro) for transcription and editing
   - `/translation` - Toggle inline Chinese translation for non-Chinese content

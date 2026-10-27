@@ -28,8 +28,8 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
    **or** Apple Podcasts URL → `services/rss_parser.py` resolves RSS feed via iTunes Lookup API and locates the episode (by iTunes ID, then URL-slug title match) → `services/downloader.py` downloads from the RSS audio URL
    **or** Xiaoyuzhou URL → `services/xiaoyuzhou_parser.py` fetches audio URL via RSSHub → `services/downloader.py` downloads
    **or** Audio file upload → downloaded from Telegram
-2. **Transcription**: `services/transcriber.py` uploads audio to Gemini File API, transcribes with Gemini model
-3. **Editing**: `services/editor.py` formats raw transcript into structured Markdown (Chinese summary + original language transcript)
+2. **Transcription**: `services/transcriber.py` uploads audio to Gemini File API, transcribes with Gemini model; each chunk is folded to simplified Chinese (zhconv, text with Japanese kana left alone) before the chunks are merged
+3. **Editing**: `services/editor.py` formats raw transcript into structured Markdown (Chinese summary + original language transcript); the final Markdown and title are folded to simplified Chinese again, since metadata and translation calls can answer in traditional script
 4. **Output**: `services/pdf_generator.py` converts Markdown to PDF via WeasyPrint
 
 ### Key Modules
@@ -42,6 +42,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 - `src/services/rss_parser.py` - Apple Podcasts RSS feed lookup and episode matching (iTunes ID + slug-based title match)
 - `src/services/xiaoyuzhou_parser.py` - Xiaoyuzhou podcast metadata extraction via RSSHub
 - `src/utils/gemini.py` - Process-wide Gemini concurrency gate and response checks (truncation, served-model reroutes)
+- `src/utils/chinese.py` - Simplified/traditional folding (`_to_simplified`, optional zhconv import that degrades to a no-op)
 - `src/utils/retry.py` - Retry wrapper for API calls
 - `src/utils/url_parser.py` - YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou URL detection
 

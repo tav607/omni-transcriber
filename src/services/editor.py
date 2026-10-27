@@ -11,6 +11,7 @@ from google import genai
 from google.genai import types
 
 from ..config import EditorConfig
+from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 
@@ -1003,7 +1004,10 @@ async def edit(
     # Step 3: Assemble final Markdown
     # ============================================
     final_output = _build_normal_result(metadata_dict, final_transcript)
-    final_output = _normalize_quotes(final_output)
+    # The metadata and translation calls can still answer in traditional script
+    # when the source leans that way, and the h1 title also names the output
+    # file. Fold before normalizing quotes: zhconv turns 「」 into curly quotes.
+    final_output = _normalize_quotes(_to_simplified(final_output))
 
     logger.info(f"Editing completed, output length: {len(final_output)}")
 
@@ -1618,15 +1622,18 @@ def _build_podcast_result(
         transcript=edited_transcript,
     )
 
+    # Same folding as the generic editor's final output: the metadata and
+    # translation calls can answer in traditional script, and the title names
+    # the file when there is no episode metadata.
     return PodcastEditedTranscript(
-        title=title,
+        title=_to_simplified(title),
         info=info,
         summary=summary,
         takeaways=takeaways,
         qa_pairs=qa_pairs,
         highlights=highlights,
         full_transcript=edited_transcript,
-        markdown=_normalize_quotes(markdown),
+        markdown=_normalize_quotes(_to_simplified(markdown)),
     )
 
 

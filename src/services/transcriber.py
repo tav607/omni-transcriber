@@ -218,6 +218,15 @@ MIME_TYPES = {
 }
 
 
+class FileHandleRejectedError(Exception):
+    """A request referencing an uploaded file came back 403 PERMISSION_DENIED.
+
+    On 2026-08-14 every file_uri request failed this way on every 3.1+ model
+    for about 11 hours while the same audio sent inline worked. Retrying and
+    switching models only burned about two minutes per chunk before the inline
+    fallback, so this skips straight to it."""
+
+
 # Inlining the audio caps the whole request at 20MB, and chunks are cut with
 # ffmpeg stream copy so they inherit the source bitrate: 15 minutes of 320kbps
 # audio is ~36MB. Anything near the ceiling is re-encoded to 64kbps mono, which
@@ -729,34 +738,31 @@ async def transcribe(
         # land afterward would never be recorded in uploaded_files and the
         # finally block could not delete them (they leak on Gemini until the 48h
         # auto-expiry, counting against the storage quota). Collect the
-        # successes so cleanup can reach them, then raise.
+        # successes so cleanup can reach them; a chunk whose upload failed is
+        # sent with its audio inline instead (None in wave_files).
         upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-        upload_errors = []
+        wave_files: List[types.File | None] = []
         cancelled = None
-        for i, result in enumerate(upload_results):
+        for chunk_path, result in zip(chunk_paths, upload_results):
             # Classify by BaseException, not Exception: a CancelledError is a
             # BaseException and must not slip through as a "successful" upload
             # (it would be appended and then blow up in the finally cleanup).
             # Record every real upload first so cleanup can reach it, then
-            # re-raise a cancellation as-is rather than folding it into the
-            # error summary.
+            # re-raise a cancellation as-is.
             if isinstance(result, asyncio.CancelledError):
                 cancelled = result
             elif isinstance(result, BaseException):
-                upload_errors.append(f"Chunk {i}: {result}")
+                logger.warning(
+                    f"Upload of {chunk_path.name} failed after retries ({result}); "
+                    "this chunk will be sent inline instead"
+                )
+                wave_files.append(None)
             else:
                 uploaded_files.append(result)
+                wave_files.append(result)
         if cancelled is not None:
             raise cancelled
-        if upload_errors:
-            logger.error(
-                f"Upload failed for {len(upload_errors)} chunks, cleaning up "
-                f"{len(uploaded_files)} successful uploads"
-            )
-            raise RuntimeError(
-                f"Failed to upload audio chunks: {'; '.join(upload_errors)}"
-            )
-        logger.info(f"Uploaded {len(uploaded_files)} files")
+        logger.info(f"Uploaded {len(uploaded_files)} of {len(chunk_paths)} files")
 
         # Step 2: Transcribe all chunks in parallel
         if on_status:
@@ -766,7 +772,7 @@ async def transcribe(
                 on_status("Transcribing...")
 
         async def transcribe_chunk(
-            uploaded_file: types.File, chunk_path: Path, duration_s: float
+            uploaded_file: types.File | None, chunk_path: Path, duration_s: float
         ) -> str:
             # Gate around the call, outside _transcribe_audio's own wait_for, so
             # queue time doesn't burn the per-chunk timeout budget.
@@ -786,12 +792,31 @@ async def transcribe(
                     return _attempt
                 return _attempt_on
 
+            async def _inline_pass() -> str:
+                part = await _inline_audio_part(
+                    chunk_path, temp_dir,
+                    MIME_TYPES.get(chunk_path.suffix.lower(), mime_type),
+                )
+                return await with_model_fallback(
+                    _attempts_from(part), config.model,
+                    context="Transcription (inline)",
+                )
+
             async def _one_pass() -> str:
+                if uploaded_file is None:
+                    return await _inline_pass()
                 try:
                     return await with_model_fallback(
                         _attempts_from(uploaded_file), config.model,
                         context="Transcription",
+                        non_retryable_exceptions=(FileHandleRejectedError,),
                     )
+                except FileHandleRejectedError as error:
+                    logger.warning(
+                        f"Transcription: the uploaded file was rejected with 403 ({error}); "
+                        "sending the audio inline instead"
+                    )
+                    return await _inline_pass()
                 except Exception as error:
                     # A File API handle can be rejected independently of the
                     # model: on 2026-08-14 every uploaded-file request returned
@@ -802,14 +827,7 @@ async def transcribe(
                         f"Transcription: the File API path failed on every model "
                         f"({error}); retrying with the audio inlined in the request"
                     )
-                    part = await _inline_audio_part(
-                        chunk_path, temp_dir,
-                        MIME_TYPES.get(chunk_path.suffix.lower(), mime_type),
-                    )
-                    return await with_model_fallback(
-                        _attempts_from(part), config.model,
-                        context="Transcription (inline)",
-                    )
+                    return await _inline_pass()
 
             # Degenerate-output guard: a chunk that transcribes to almost nothing
             # (e.g. just a speaker's name) is retried. Measured on the cleaned
@@ -839,7 +857,7 @@ async def transcribe(
 
         transcribe_tasks = [
             transcribe_chunk(f, p, d)
-            for f, p, d in zip(uploaded_files, chunk_paths, chunk_durations_s)
+            for f, p, d in zip(wave_files, chunk_paths, chunk_durations_s)
         ]
         # Settle every chunk before raising: a bare gather propagates the first
         # failure while sibling transcriptions are still in flight, and the
@@ -967,12 +985,10 @@ async def _transcribe_audio(
     prompt = _build_transcription_prompt(metadata, podcast_mode)
     # Either a File API handle or an already-built inline part, so the inline
     # fallback reuses this function rather than duplicating prompt assembly.
+    is_file_ref = not isinstance(uploaded_file, types.Part)
     audio_part = (
-        uploaded_file
-        if isinstance(uploaded_file, types.Part)
-        else types.Part.from_uri(
-            file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type
-        )
+        types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type)
+        if is_file_ref else uploaded_file
     )
 
     def _generate():
@@ -1002,6 +1018,10 @@ async def _transcribe_audio(
             f"Transcription timed out after {TRANSCRIPTION_TIMEOUT_SECONDS // 60} minutes. "
             "The audio chunk may be too long or the API is unresponsive."
         )
+    except Exception as e:
+        if is_file_ref and getattr(e, "code", None) == 403:
+            raise FileHandleRejectedError(str(e)) from e
+        raise
     _check_served_model(model, getattr(response, "model_version", None))
 
     # Validate response

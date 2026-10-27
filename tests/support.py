@@ -1,7 +1,7 @@
 """Fakes that run the transcription and edit pipelines without ffmpeg or Gemini."""
 
 import asyncio
-import os
+import shutil
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
@@ -37,10 +37,15 @@ class TranscribeRun:
         self.deleted: list[str] = []
 
     def run(self, podcast_mode: bool = False) -> str:
-        fd, audio = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
+        """Audio that fits one chunk is sent as the source file, audio.mp3;
+        longer audio is split into chunk_000.mp3, chunk_001.mp3, ..."""
+        workdir = Path(tempfile.mkdtemp(prefix="omni_test_"))
+        audio = workdir / "audio.mp3"
+        audio.touch()
 
         def split(audio_path, output_dir):
+            if self.chunks == 1:
+                return [audio_path], [60_000], 60_000
             paths = [output_dir / f"chunk_{i:03d}.mp3" for i in range(self.chunks)]
             return paths, [60_000] * self.chunks, 60_000 * self.chunks
 
@@ -68,11 +73,11 @@ class TranscribeRun:
                 # Retries back off without sleeping.
                 stack.enter_context(mock.patch.object(retry, "MAX_RETRY_DELAY_MS", 0))
                 return asyncio.run(transcriber.transcribe(
-                    audio, TranscriberConfig(api_key="test-key", model=MODEL),
+                    str(audio), TranscriberConfig(api_key="test-key", model=MODEL),
                     podcast_mode=podcast_mode,
                 ))
         finally:
-            os.unlink(audio)
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 def run_edit(raw: str, edit_chunk, metadata: dict) -> str:

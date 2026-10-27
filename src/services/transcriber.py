@@ -432,6 +432,50 @@ def _unify_short_name_labels(transcript: str) -> str:
     return _NAMED_LABEL_RE.sub(_sub, transcript)
 
 
+def _unify_prefix_name_labels(transcript: str) -> str:
+    """Merge full-name labels that differ only by a shortened first name.
+
+    The same person can come back as **Spencer Neumann:** in one chunk and
+    **Spence Neumann:** in another (Netflix Q2 2026 run in the transcribe
+    skill, 2026-09-11), which the first-name merge above does not cover. Two
+    labels merge when everything after the first name matches exactly and one
+    first name is a prefix of the other; the label with more turns wins. A
+    surname carried by a third label is ambiguous and left alone.
+    """
+    counts: dict[str, int] = {}
+    spelling: dict[str, str] = {}
+    for m in _NAMED_LABEL_RE.finditer(transcript):
+        name = m.group(1).strip()
+        key = name.casefold()
+        spelling.setdefault(key, name)
+        counts[key] = counts.get(key, 0) + 1
+
+    by_surname: dict[str, list[str]] = {}
+    for key in spelling:
+        parts = key.split()
+        if len(parts) >= 2 and parts[0] not in _ROLE_LABEL_WORDS:
+            by_surname.setdefault(" ".join(parts[1:]), []).append(key)
+
+    remap: dict[str, str] = {}
+    for keys in by_surname.values():
+        if len(keys) != 2:
+            continue
+        a, b = keys
+        fa, fb = a.split()[0], b.split()[0]
+        if fa == fb or not (fa.startswith(fb) or fb.startswith(fa)):
+            continue
+        winner, loser = (a, b) if counts[a] >= counts[b] else (b, a)
+        remap[loser] = spelling[winner]
+    if not remap:
+        return transcript
+
+    def _sub(m: re.Match) -> str:
+        full = remap.get(m.group(1).strip().casefold())
+        return f"**{full}:**" if full else m.group(0)
+
+    return _NAMED_LABEL_RE.sub(_sub, transcript)
+
+
 def _strip_for_matching_with_map(text: str) -> tuple[str, list[int]]:
     """Strip speaker labels, whitespace, and punctuation for fuzzy overlap
     matching. Returns (clean_text, mapping) where mapping[i] is the index in
@@ -588,8 +632,9 @@ def _merge_transcriptions(transcripts: List[str]) -> str:
         merged = merged + "\n\n" + current
 
     # Chunks label speakers independently, so a later chunk may fall back to a
-    # first name; unify to full names after every seam is stitched.
-    return _unify_short_name_labels(merged)
+    # first name or shorten one (Spence / Spencer); unify to full names after
+    # every seam is stitched.
+    return _unify_prefix_name_labels(_unify_short_name_labels(merged))
 
 
 async def transcribe(

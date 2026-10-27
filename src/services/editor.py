@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 from ..config import EditorConfig
-from ..utils.gemini import is_truncated, _gemini_sem
+from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
 from ..utils.retry import with_retry, with_model_fallback
 
 logger = logging.getLogger(__name__)
@@ -77,9 +77,11 @@ async def _gemini_generate(
         return client.models.generate_content(model=model, contents=contents, config=config)
 
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_generate), timeout=timeout)
+        response = await asyncio.wait_for(asyncio.to_thread(_generate), timeout=timeout)
     except asyncio.TimeoutError:
         raise TimeoutError(f"Gemini call timed out after {int(timeout) // 60} minutes")
+    _check_served_model(model, getattr(response, "model_version", None))
+    return response
 
 
 @dataclass

@@ -11,6 +11,9 @@ uv sync
 # Run the bot
 uv run python -m src.main
 
+# Run the offline unit tests (no API calls; tests/__init__.py sets placeholder credentials)
+uv run python -m unittest discover -s tests -t .
+
 # System dependencies (Ubuntu/Debian)
 sudo apt install libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf2.0-0 libffi-dev shared-mime-info ffmpeg
 ```
@@ -38,6 +41,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 - `src/services/downloader.py` - Audio download via yt-dlp (YouTube/Bilibili/direct URLs)
 - `src/services/rss_parser.py` - Apple Podcasts RSS feed lookup and episode matching (iTunes ID + slug-based title match)
 - `src/services/xiaoyuzhou_parser.py` - Xiaoyuzhou podcast metadata extraction via RSSHub
+- `src/utils/gemini.py` - Process-wide Gemini concurrency gate and response checks (truncation, served-model reroutes)
 - `src/utils/retry.py` - Retry wrapper for API calls
 - `src/utils/url_parser.py` - YouTube/Bilibili/Apple Podcasts/Xiaoyuzhou URL detection
 
@@ -45,7 +49,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 
 All config via environment variables (see `.env.example`). Key settings:
 - `GEMINI_API_KEY` / `TELEGRAM_BOT_TOKEN` - Required
-- `TRANSCRIBER_MODEL` / `EDITOR_MODEL` / `TRANSLATION_MODEL` - Gemini models (default: gemini-3.8-flash for all three). All three are pinned to a version on purpose: `gemini-flash-latest` repointed to 3.7-flash on its release day, so an alias here would swap the model without anyone deciding to. A pin can still go stale: since 2026-10-08 Google answers `gemini-3.7-flash` requests with 3.8-flash, visible only in the response's `model_version`. Telegram requests ignore `TRANSCRIBER_MODEL` / `EDITOR_MODEL` and resolve the chat's flash/pro choice through `MODELS` in `src/bot/handlers.py`; only the Dropbox watcher reads those two variables. A model change needs both places.
+- `TRANSCRIBER_MODEL` / `EDITOR_MODEL` / `TRANSLATION_MODEL` - Gemini models (default: gemini-3.8-flash for all three). All three are pinned to a version on purpose: `gemini-flash-latest` repointed to 3.7-flash on its release day, so an alias here would swap the model without anyone deciding to. A pin can still go stale: since 2026-10-08 Google answers `gemini-3.7-flash` requests with 3.8-flash, visible only in the response's `model_version`. Every Gemini call therefore compares `model_version` with the requested id and logs one WARNING per rerouted pair (`Requested X but Google served Y`; `*-latest` aliases and version suffixes such as `-001` are not reroutes). There is no admin channel, so this only reaches the journal: `journalctl -u omni-transcriber | grep "Google served"`. Telegram requests ignore `TRANSCRIBER_MODEL` / `EDITOR_MODEL` and resolve the chat's flash/pro choice through `MODELS` in `src/bot/handlers.py`; only the Dropbox watcher reads those two variables. A model change needs both places.
 - `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - Gemini native thinking_level: "low", "medium", or "high" (both default "high"; metadata generation is always "high", translation/glossary always "low")
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
 - `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support

@@ -20,7 +20,7 @@ from google.genai import types
 from ..config import TranscriberConfig
 from ..utils.chinese import _to_simplified, _zh_fold
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
-from ..utils.retry import with_retry, with_model_fallback
+from ..utils.retry import ResponseBlockedError, with_retry, with_model_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -956,10 +956,12 @@ async def transcribe(
                 on_status("Transcribing...")
 
         async def transcribe_chunk(
-            uploaded_file: types.File | None, chunk_path: Path, duration_s: float
+            uploaded_file: types.File | None, chunk_path: Path, duration_s: float, label: str
         ) -> str:
-            # Gate around the call, outside _transcribe_audio's own wait_for, so
-            # queue time doesn't burn the per-chunk timeout budget.
+            # `label` ("chunk 2/4") goes into every log line, so a failure names
+            # the request it came from. Gate around the call, outside
+            # _transcribe_audio's own wait_for, so queue time doesn't burn the
+            # per-chunk timeout budget.
             def _attempts_from(audio_source):
                 def _attempt_on(model_id: str):
                     async def _attempt():
@@ -972,6 +974,7 @@ async def transcribe(
                                 config.thinking_level,
                                 metadata,
                                 podcast_mode,
+                                label=label,
                             )
                     return _attempt
                 return _attempt_on
@@ -983,7 +986,7 @@ async def transcribe(
                 )
                 return await with_model_fallback(
                     _attempts_from(part), config.model,
-                    context="Transcription (inline)",
+                    context=f"Transcription {label} (inline)",
                 )
 
             async def _one_pass() -> str:
@@ -992,12 +995,16 @@ async def transcribe(
                 try:
                     return await with_model_fallback(
                         _attempts_from(uploaded_file), config.model,
-                        context="Transcription",
+                        context=f"Transcription {label}",
                         non_retryable_exceptions=(FileHandleRejectedError,),
                     )
+                except ResponseBlockedError:
+                    # Both models blocked it. Inlined audio was blocked the same
+                    # way, since the block follows the request, not the handle.
+                    raise
                 except FileHandleRejectedError as error:
                     logger.warning(
-                        f"Transcription: the uploaded file was rejected with 403 ({error}); "
+                        f"Transcription {label}: the uploaded file was rejected with 403 ({error}); "
                         "sending the audio inline instead"
                     )
                     return await _inline_pass()
@@ -1008,7 +1015,7 @@ async def transcribe(
                     # sent inline transcribed fine. Swapping models cannot fix
                     # that, so the last resort drops the file reference entirely.
                     logger.warning(
-                        f"Transcription: the File API path failed on every model "
+                        f"Transcription {label}: the File API path failed on every model "
                         f"({error}); retrying with the audio inlined in the request"
                     )
                     return await _inline_pass()
@@ -1023,25 +1030,30 @@ async def transcribe(
             min_chars = max(10, int(duration_s * MIN_TRANSCRIPT_CHARS_PER_SEC))
             text = ""
             for attempt in range(1, TRANSCRIPTION_SHORT_RETRIES + 1):
-                text = await _one_pass()
+                try:
+                    text = await _one_pass()
+                except Exception as error:
+                    # Logged here because the gather below raises only the first error.
+                    logger.error(f"Transcription {label} failed: {error}")
+                    raise
                 cleaned_len = len(cleanup_repetitive_characters(text).strip())
                 if duration_s <= 0 or cleaned_len >= min_chars:
                     return text
                 if attempt < TRANSCRIPTION_SHORT_RETRIES:
                     logger.warning(
-                        f"Transcript suspiciously short ({cleaned_len} chars for "
+                        f"Transcript {label} suspiciously short ({cleaned_len} chars for "
                         f"{duration_s:.0f}s of audio, expected >= {min_chars}); "
                         f"retrying ({attempt}/{TRANSCRIPTION_SHORT_RETRIES})"
                     )
             logger.warning(
-                f"Transcript still short after {TRANSCRIPTION_SHORT_RETRIES} attempts; "
+                f"Transcript {label} still short after {TRANSCRIPTION_SHORT_RETRIES} attempts; "
                 "accepting it (audio may be legitimately sparse)"
             )
             return text
 
         transcribe_tasks = [
-            transcribe_chunk(f, p, d)
-            for f, p, d in zip(wave_files, chunk_paths, chunk_durations_s)
+            transcribe_chunk(f, p, d, f"chunk {i + 1}/{len(chunk_paths)}")
+            for i, (f, p, d) in enumerate(zip(wave_files, chunk_paths, chunk_durations_s))
         ]
         # Settle every chunk before raising: a bare gather propagates the first
         # failure while sibling transcriptions are still in flight, and the
@@ -1162,10 +1174,11 @@ async def _transcribe_audio(
     thinking_level: str,
     metadata: Optional[TranscriptionMetadata] = None,
     podcast_mode: bool = False,
+    label: str = "chunk",
 ) -> str:
     """Transcribe audio using Gemini model."""
     source = getattr(uploaded_file, "name", None) or "inline audio"
-    logger.info(f"Processing transcription for {source}...")
+    logger.info(f"Transcribing {label} ({source}) on {model}...")
 
     # Build prompt with or without metadata context
     prompt = _build_transcription_prompt(metadata, podcast_mode)
@@ -1213,16 +1226,18 @@ async def _transcribe_audio(
     # Validate response
     text = response.text
     if not text or text.strip() == "":
-        error_msg = "Transcription returned empty result."
-        if hasattr(response, "prompt_feedback") and response.prompt_feedback:
-            if hasattr(response.prompt_feedback, "block_reason"):
-                error_msg += f" Block reason: {response.prompt_feedback.block_reason}"
-        raise ValueError(error_msg)
+        block_reason = getattr(response.prompt_feedback, "block_reason", None)
+        if block_reason is not None:
+            raise ResponseBlockedError(
+                f"Gemini blocked the response on {model} "
+                f"(block_reason={getattr(block_reason, 'name', None) or block_reason})"
+            )
+        raise ValueError("Transcription returned empty result.")
 
     # Warn only: a long chunk hitting the output cap is not fixable by a retry,
     # and the partial transcript is still worth keeping.
     if is_truncated(response):
-        logger.warning("Transcription hit max output tokens; chunk result may be truncated")
+        logger.warning(f"Transcription {label} hit max output tokens on {model}; it may be truncated")
 
     return text
 

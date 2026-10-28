@@ -59,7 +59,7 @@ class TranscribeRun:
             return types.Part.from_bytes(data=path.name.encode(), mime_type="audio/mpeg")
 
         async def transcribe_audio(client, source, model, temperature, thinking_level,
-                                   metadata=None, podcast_mode=False):
+                                   metadata=None, podcast_mode=False, label="chunk"):
             return self.answer(source, model)
 
         async def delete(client, name):

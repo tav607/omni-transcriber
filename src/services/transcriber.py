@@ -248,6 +248,16 @@ MIME_TYPES = {
 }
 
 
+# ffmpeg and ffprobe echo the source file's tags into stderr, and those tags
+# are not always UTF-8: Chinese podcast mp3s routinely carry GBK-encoded ID3
+# frames. Under a strict text=True the decode raises before the returncode is
+# ever inspected, so the whole run dies on a metadata byte with a traceback
+# naming neither the file nor ffmpeg. Replacement characters in a diagnostic
+# string cost nothing; callers only match on returncode or log stderr (the
+# duration probe parses stdout, which holds nothing but ffprobe's ASCII number).
+_FFMPEG_TEXT = {"text": True, "errors": "replace"}
+
+
 class FileHandleRejectedError(Exception):
     """A request referencing an uploaded file came back 403 PERMISSION_DENIED.
 
@@ -274,7 +284,7 @@ async def _inline_audio_part(path: Path, temp_dir: Path, mime_type: str) -> type
                 subprocess.run,
                 ["ffmpeg", "-y", "-v", "error", "-i", str(path),
                  "-ac", "1", "-b:a", "64k", "--", str(src)],
-                capture_output=True, text=True,
+                capture_output=True, **_FFMPEG_TEXT,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -328,7 +338,7 @@ def _get_audio_duration(audio_path: Path) -> int:
         "-of", "csv=p=0",
         "--", str(audio_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, **_FFMPEG_TEXT, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr}")
     duration_seconds = float(result.stdout.strip())
@@ -430,7 +440,7 @@ def _split_audio(
             "-avoid_negative_ts", "1",
             "--", str(chunk_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, **_FFMPEG_TEXT, timeout=300)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg split failed: {result.stderr}")
 

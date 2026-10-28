@@ -41,26 +41,28 @@ MODELS = {
     "pro": "gemini-pro-latest",
     "argon": "gemini-4-argon",
 }
-# Which choices /model offers per component: Argon edits only (see below).
+# Which choices /model offers per component.
 MODEL_CHOICES = {
-    "transcriber": ("flash", "pro"),
+    "transcriber": ("flash", "pro", "argon"),
     "editor": ("flash", "pro", "argon"),
 }
 
-# Default models. Transcription: measured against the CoreWeave Q2 2026
-# corrected transcript and Dwarkesh's published transcript on 2026-08-14,
-# 3.7-flash matches 3.1-pro on word error rate and beats it on entity recall,
-# while 1 of 5 pro runs fabricated 146 words of plausible financial guidance
-# that was never spoken. Editing (and the summary/metadata step, which uses the
-# editor model) runs on Gemini 4 Argon: re-editing three October 2026 expert
-# calls in the transcribe skill, Argon lost 2-5% of the distinct content words
-# before the fidelity guard, where gemini-3.8-flash lost 4-15%, at about the
-# same cost per call ($0.17-0.33 against $0.14-0.19, at Argon's introductory
-# $2/$10 per 1M tokens, which doubles on 2026-12-01; Argon thinks far less).
-# Transcription stays on 3.8: Argon costs about twice as much per hour of audio
-# for no measured gain, so /model offers Argon for the editor only. Chats that
-# picked a model explicitly keep their stored choice.
-DEFAULT_TRANSCRIBER_MODEL = "flash"
+# Default models: Gemini 4 Argon for both. Transcription moved from 3.8-flash
+# on 2026-10-28, after a paired run in the transcribe skill on its production
+# prompt: WER 3.97% against 4.54% on a 65-minute earnings call and 6.86%
+# against 7.35% on a 37-minute interview, CER 19.8% against 22.8% on a
+# 38-minute Mandarin meeting, about level on short clips. Argon was never
+# blocked in 79 calls (3.8 once) and finished each 15-minute chunk in 39-101s
+# against 48-315s; long audio cost about the same per hour at its introductory
+# $2/$10 per 1M tokens, and costs about twice 3.8's once that doubles on
+# 2026-12-01. Pro is no default: in the 2026-08-14 runs, 1 of 5 pro
+# transcriptions fabricated 146 words of financial guidance that was never
+# spoken. Editing (and the summary/metadata step, which uses the editor model):
+# re-editing three October 2026 expert calls, Argon lost 2-5% of the distinct
+# content words before the fidelity guard, where 3.8-flash lost 4-15%, at about
+# the same cost per call. Chats that picked a model explicitly keep their
+# stored choice.
+DEFAULT_TRANSCRIBER_MODEL = "argon"
 DEFAULT_EDITOR_MODEL = "argon"
 
 # Supported audio MIME types
@@ -229,7 +231,7 @@ async def cmd_help(message: Message):
         "*Audio Files:*\n"
         "Send me an audio file (mp3, m4a, wav, webm, etc.)\n\n"
         "*Settings:*\n"
-        "`/model` - Choose AI model (Flash/Pro; the editor also offers Argon, its default)\n"
+        "`/model` - Choose AI models for transcription and editing (Argon by default, or Flash/Pro)\n"
         "`/translation` - Toggle inline Chinese translation\n\n"
         "*Podcast mode:*\n"
         "Interview / talk-show videos are auto-detected and formatted with "
@@ -339,6 +341,10 @@ async def cmd_model(message: Message):
                 text=f"{'✓ ' if current_transcriber == 'pro' else ''}Pro",
                 callback_data="model_transcriber_pro",
             ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_transcriber == 'argon' else ''}Argon",
+                callback_data="model_transcriber_argon",
+            ),
         ],
         [InlineKeyboardButton(
             text="── Editor ──",
@@ -391,8 +397,7 @@ async def model_callback(callback: CallbackQuery):
         return
 
     _, component, model = parts
-    # Argon is offered for the editor only; a crafted model_transcriber_argon
-    # is ignored like any other unknown choice.
+    # A crafted callback naming an unknown component or model is ignored.
     if model not in MODEL_CHOICES.get(component, ()):
         return
 

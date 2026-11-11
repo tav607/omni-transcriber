@@ -5,7 +5,6 @@ import asyncio
 import re
 import logging
 import math
-import os
 import shutil
 import subprocess
 import sys
@@ -19,26 +18,14 @@ from google.genai import types
 
 from ..config import TranscriberConfig
 from ..utils.chinese import _to_simplified, _zh_fold
-from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
-from ..utils.retry import ResponseBlockedError, with_retry, with_model_fallback
+from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem, get_client, model_path
+from ..utils.retry import ResponseBlockedError, with_model_fallback
 
 logger = logging.getLogger(__name__)
 
-# Module-level client cache: reuse genai.Client to avoid recreating HTTP connection pools
-_client_cache: dict[str, genai.Client] = {}
-
-
 def _get_client(api_key: str) -> genai.Client:
-    """Get or create a shared genai.Client for the given API key.
-
-    base_url is left unset so the google-genai SDK's own GOOGLE_GEMINI_BASE_URL
-    environment variable takes effect (its default matches the official
-    endpoint, so behaviour is unchanged unless that variable is set to route
-    Gemini through a relay/proxy).
-    """
-    if api_key not in _client_cache:
-        _client_cache[api_key] = genai.Client(api_key=api_key)
-    return _client_cache[api_key]
+    """The shared Vertex AI client (see utils/gemini.py)."""
+    return get_client(api_key)
 
 # Audio splitting constants. 15 minutes per chunk: transcription accuracy
 # degrades late in long chunks (2026-08 benchmarks in the transcribe skill:
@@ -78,8 +65,6 @@ _PAUSE_FRAME_S = _PAUSE_FRAME / _PAUSE_RATE
 
 # Timeout for transcription API calls (15 minutes per chunk, generous for long audio)
 TRANSCRIPTION_TIMEOUT_SECONDS = 15 * 60
-# Timeout for file upload (5 minutes, should be enough for ~100MB files)
-UPLOAD_TIMEOUT_SECONDS = 5 * 60
 
 # Degenerate-output floor: far below real speech density (Chinese ~3-5,
 # English ~12-15 chars/sec), so only content-free responses trip it.
@@ -258,20 +243,13 @@ MIME_TYPES = {
 _FFMPEG_TEXT = {"text": True, "errors": "replace"}
 
 
-class FileHandleRejectedError(Exception):
-    """A request referencing an uploaded file came back 403 PERMISSION_DENIED.
-
-    On 2026-08-14 every file_uri request failed this way on every 3.1+ model
-    for about 11 hours while the same audio sent inline worked. Retrying and
-    switching models only burned about two minutes per chunk before the inline
-    fallback, so this skips straight to it."""
-
-
-# Inlining the audio caps the whole request at 20MB, and chunks are cut with
-# ffmpeg stream copy so they inherit the source bitrate: 15 minutes of 320kbps
-# audio is ~36MB. Anything near the ceiling is re-encoded to 64kbps mono, which
-# fits 15 minutes into ~7MB and stays well above what speech recognition needs.
-INLINE_AUDIO_MAX_BYTES = 18_000_000
+# Audio travels inside the request: Vertex AI has no File API. Chunks are cut
+# with ffmpeg stream copy, so they inherit the source bitrate. Vertex accepts
+# large inline parts (a 42MB WAV went through in testing), and 50MB holds a
+# 15-minute chunk of any compressed format (320kbps is ~36MB). Anything larger
+# (uncompressed or lossless audio) is re-encoded to 64kbps mono, ~7MB per 15
+# minutes and well above what speech recognition needs.
+INLINE_AUDIO_MAX_BYTES = 50_000_000
 
 
 async def _inline_audio_part(path: Path, temp_dir: Path, mime_type: str) -> types.Part:
@@ -288,12 +266,12 @@ async def _inline_audio_part(path: Path, temp_dir: Path, mime_type: str) -> type
             )
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"Inline fallback: mp3 re-encode failed: {result.stderr[-300:]}"
+                    f"Inline audio: mp3 re-encode failed: {result.stderr[-300:]}"
                 )
         size = src.stat().st_size
         if size > INLINE_AUDIO_MAX_BYTES:
             raise RuntimeError(
-                f"Inline fallback: chunk is still {size / 1e6:.0f}MB after "
+                f"Inline audio: chunk is still {size / 1e6:.0f}MB after "
                 "re-encoding, too large to send inline"
             )
         mime_type = "audio/mpeg"
@@ -862,7 +840,6 @@ async def transcribe(
 
     chunk_paths: List[Path] = []
     temp_dir = None
-    uploaded_files: List[types.File] = []
 
     try:
         # Split audio if needed (ffmpeg stream copy, cut in pauses)
@@ -891,73 +868,14 @@ async def transcribe(
         ext = audio_path_obj.suffix.lower()
         mime_type = MIME_TYPES.get(ext, "audio/mpeg")
 
-        # Step 1: Upload all chunks in parallel
-        if on_status:
-            if len(chunk_paths) > 1:
-                on_status(f"Uploading {len(chunk_paths)} audio chunks...")
-            else:
-                on_status("Uploading audio...")
-
-        logger.info("Uploading audio to Gemini File API...")
-
-        async def upload_chunk(chunk_path: Path) -> types.File:
-            chunk_mime = MIME_TYPES.get(chunk_path.suffix.lower(), mime_type)
-
-            # Acquire the gate inside the retried attempt but around the call, so
-            # the queue wait sits outside _upload_file's own wait_for budget.
-            async def _attempt():
-                async with _gemini_sem:
-                    return await _upload_file(client, str(chunk_path), chunk_mime)
-
-            return await with_retry(
-                _attempt,
-                max_attempts=3,
-                base_delay_ms=1000,
-                context=f"File upload {chunk_path.name}",
-            )
-
-        upload_tasks = [upload_chunk(p) for p in chunk_paths]
-        # Settle every upload before proceeding: a bare gather propagates the
-        # first failure while sibling uploads are still in flight, so any that
-        # land afterward would never be recorded in uploaded_files and the
-        # finally block could not delete them (they leak on Gemini until the 48h
-        # auto-expiry, counting against the storage quota). Collect the
-        # successes so cleanup can reach them; a chunk whose upload failed is
-        # sent with its audio inline instead (None in wave_files).
-        upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-        wave_files: List[types.File | None] = []
-        cancelled = None
-        for chunk_path, result in zip(chunk_paths, upload_results):
-            # Classify by BaseException, not Exception: a CancelledError is a
-            # BaseException and must not slip through as a "successful" upload
-            # (it would be appended and then blow up in the finally cleanup).
-            # Record every real upload first so cleanup can reach it, then
-            # re-raise a cancellation as-is.
-            if isinstance(result, asyncio.CancelledError):
-                cancelled = result
-            elif isinstance(result, BaseException):
-                logger.warning(
-                    f"Upload of {chunk_path.name} failed after retries ({result}); "
-                    "this chunk will be sent inline instead"
-                )
-                wave_files.append(None)
-            else:
-                uploaded_files.append(result)
-                wave_files.append(result)
-        if cancelled is not None:
-            raise cancelled
-        logger.info(f"Uploaded {len(uploaded_files)} of {len(chunk_paths)} files")
-
-        # Step 2: Transcribe all chunks in parallel
+        # Transcribe all chunks in parallel, each with its audio inlined in the request
         if on_status:
             if len(chunk_paths) > 1:
                 on_status(f"Transcribing {len(chunk_paths)} chunks in parallel...")
             else:
                 on_status("Transcribing...")
 
-        async def transcribe_chunk(
-            uploaded_file: types.File | None, chunk_path: Path, duration_s: float, label: str
-        ) -> str:
+        async def transcribe_chunk(chunk_path: Path, duration_s: float, label: str) -> str:
             # `label` ("chunk 2/4") goes into every log line, so a failure names
             # the request it came from. Gate around the call, outside
             # _transcribe_audio's own wait_for, so queue time doesn't burn the
@@ -979,46 +897,15 @@ async def transcribe(
                     return _attempt
                 return _attempt_on
 
-            async def _inline_pass() -> str:
+            async def _one_pass() -> str:
                 part = await _inline_audio_part(
                     chunk_path, temp_dir,
                     MIME_TYPES.get(chunk_path.suffix.lower(), mime_type),
                 )
                 return await with_model_fallback(
                     _attempts_from(part), config.model,
-                    context=f"Transcription {label} (inline)",
+                    context=f"Transcription {label}",
                 )
-
-            async def _one_pass() -> str:
-                if uploaded_file is None:
-                    return await _inline_pass()
-                try:
-                    return await with_model_fallback(
-                        _attempts_from(uploaded_file), config.model,
-                        context=f"Transcription {label}",
-                        non_retryable_exceptions=(FileHandleRejectedError,),
-                    )
-                except ResponseBlockedError:
-                    # Both models blocked it. Inlined audio was blocked the same
-                    # way, since the block follows the request, not the handle.
-                    raise
-                except FileHandleRejectedError as error:
-                    logger.warning(
-                        f"Transcription {label}: the uploaded file was rejected with 403 ({error}); "
-                        "sending the audio inline instead"
-                    )
-                    return await _inline_pass()
-                except Exception as error:
-                    # A File API handle can be rejected independently of the
-                    # model: on 2026-08-14 every uploaded-file request returned
-                    # 403 PERMISSION_DENIED on both models while the same audio
-                    # sent inline transcribed fine. Swapping models cannot fix
-                    # that, so the last resort drops the file reference entirely.
-                    logger.warning(
-                        f"Transcription {label}: the File API path failed on every model "
-                        f"({error}); retrying with the audio inlined in the request"
-                    )
-                    return await _inline_pass()
 
             # Degenerate-output guard: a chunk that transcribes to almost nothing
             # (e.g. just a speaker's name) is retried. Measured on the cleaned
@@ -1052,16 +939,16 @@ async def transcribe(
             return text
 
         transcribe_tasks = [
-            transcribe_chunk(f, p, d, f"chunk {i + 1}/{len(chunk_paths)}")
-            for i, (f, p, d) in enumerate(zip(wave_files, chunk_paths, chunk_durations_s))
+            transcribe_chunk(p, d, f"chunk {i + 1}/{len(chunk_paths)}")
+            for i, (p, d) in enumerate(zip(chunk_paths, chunk_durations_s))
         ]
         # Settle every chunk before raising: a bare gather propagates the first
         # failure while sibling transcriptions are still in flight, and the
-        # finally block would then delete their uploaded files out from under
-        # them (each orphan burns its retries against a now-deleted file while
-        # holding a shared Gemini slot). return_exceptions=True lets them all
-        # finish first; a cancellation propagates, otherwise the first real
-        # error is raised (one chunk failing still fails the whole run).
+        # finally block would then remove the chunk files out from under them
+        # (each orphan keeps retrying while holding a shared Gemini slot).
+        # return_exceptions=True lets them all finish first; a cancellation
+        # propagates, otherwise the first real error is raised (one chunk
+        # failing still fails the whole run).
         results = await asyncio.gather(*transcribe_tasks, return_exceptions=True)
         cancelled = next(
             (r for r in results if isinstance(r, asyncio.CancelledError)), None
@@ -1098,19 +985,6 @@ async def transcribe(
         return full_text
 
     finally:
-        # Always clean up uploaded files
-        logger.info("Cleaning up uploaded files...")
-        if on_status:
-            on_status("Cleaning up...")
-
-        for uploaded_file in uploaded_files:
-            try:
-                await _delete_file(client, uploaded_file.name)
-            except Exception:
-                logger.warning(
-                    f"Failed to clean up uploaded file {uploaded_file.name}"
-                )
-
         # Cleanup temp directory if created
         if temp_dir and temp_dir.exists():
             try:
@@ -1120,55 +994,9 @@ async def transcribe(
                 logger.warning(f"Failed to clean up temp directory: {e}")
 
 
-async def _upload_file(
-    client: genai.Client, file_path: str, mime_type: str
-) -> types.File:
-    """Upload a file to Gemini File API."""
-    path = Path(file_path)
-    original_name = path.name
-
-    async def _do_upload(upload_path: str) -> types.File:
-        """Perform upload with timeout."""
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    client.files.upload,
-                    file=upload_path,
-                    config=types.UploadFileConfig(mime_type=mime_type),
-                ),
-                timeout=UPLOAD_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(
-                f"File upload timed out after {UPLOAD_TIMEOUT_SECONDS // 60} minutes."
-            )
-
-    # Check if filename contains non-ASCII characters
-    try:
-        original_name.encode("ascii")
-        # ASCII-safe, upload directly
-        return await _do_upload(file_path)
-    except UnicodeEncodeError:
-        # Non-ASCII filename, copy to temp file with safe name
-        logger.debug(f"Non-ASCII filename detected: {original_name}, using temp file")
-        with tempfile.NamedTemporaryFile(
-            suffix=path.suffix, prefix="upload_", delete=False
-        ) as tmp:
-            tmp_path = tmp.name
-        try:
-            shutil.copy2(file_path, tmp_path)
-            return await _do_upload(tmp_path)
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
 async def _transcribe_audio(
     client: genai.Client,
-    uploaded_file: types.File | types.Part,
+    audio_part: types.Part,
     model: str,
     temperature: float,
     thinking_level: str,
@@ -1177,22 +1005,14 @@ async def _transcribe_audio(
     label: str = "chunk",
 ) -> str:
     """Transcribe audio using Gemini model."""
-    source = getattr(uploaded_file, "name", None) or "inline audio"
-    logger.info(f"Transcribing {label} ({source}) on {model}...")
+    logger.info(f"Transcribing {label} on {model}...")
 
     # Build prompt with or without metadata context
     prompt = _build_transcription_prompt(metadata, podcast_mode)
-    # Either a File API handle or an already-built inline part, so the inline
-    # fallback reuses this function rather than duplicating prompt assembly.
-    is_file_ref = not isinstance(uploaded_file, types.Part)
-    audio_part = (
-        types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type)
-        if is_file_ref else uploaded_file
-    )
 
     def _generate():
         return client.models.generate_content(
-            model=model,
+            model=model_path(model),
             contents=[
                 types.Content(
                     role="user",
@@ -1217,10 +1037,6 @@ async def _transcribe_audio(
             f"Transcription timed out after {TRANSCRIPTION_TIMEOUT_SECONDS // 60} minutes. "
             "The audio chunk may be too long or the API is unresponsive."
         )
-    except Exception as e:
-        if is_file_ref and getattr(e, "code", None) == 403:
-            raise FileHandleRejectedError(str(e)) from e
-        raise
     _check_served_model(model, getattr(response, "model_version", None))
 
     # Validate response
@@ -1240,8 +1056,3 @@ async def _transcribe_audio(
         logger.warning(f"Transcription {label} hit max output tokens on {model}; it may be truncated")
 
     return text
-
-
-async def _delete_file(client: genai.Client, file_name: str) -> None:
-    """Delete a file from Gemini File API."""
-    await asyncio.to_thread(client.files.delete, name=file_name)

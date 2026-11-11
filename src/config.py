@@ -5,6 +5,8 @@ from typing import Literal
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
+from .utils.gemini import VERTEX_KEY_FILE, VERTEX_PROJECT_FILE, vertex_credentials
+
 load_dotenv(override=True)
 
 
@@ -168,11 +170,12 @@ def _validate_thinking_level(value: str, field_name: str) -> Literal["low", "med
 def load_config() -> AppConfig:
     """Load configuration from environment variables."""
     # Validate required environment variables
-    gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-    if not gemini_api_key:
+    gemini_api_key, vertex_project = vertex_credentials()
+    if not (gemini_api_key and vertex_project):
         raise ValueError(
-            "GEMINI_API_KEY environment variable is required. "
-            "Please set it in your .env file."
+            "Vertex AI credentials are required: the API key in "
+            f"{VERTEX_KEY_FILE} and the GCP project id in {VERTEX_PROJECT_FILE} "
+            "(or VERTEX_API_KEY and VERTEX_PROJECT in the environment)."
         )
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")

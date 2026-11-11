@@ -23,19 +23,15 @@ def inline_chunk_name(part: types.Part) -> str:
 
 
 class TranscribeRun:
-    """transcribe() with the audio split, the File API and the model faked.
+    """transcribe() with the audio split and the model faked.
 
-    upload(path) returns a types.File or raises; answer(source, model) returns
-    the transcript for a File handle or an inline types.Part, or raises.
+    answer(part, model) returns the transcript for an inline types.Part (see
+    inline_chunk_name for which chunk it carries), or raises.
     """
 
-    def __init__(self, answer, chunks: int = 1, upload=None):
+    def __init__(self, answer, chunks: int = 1):
         self.answer = answer
         self.chunks = chunks
-        self.upload = upload or (lambda path: types.File(
-            name=f"files/{path.stem}", uri=f"https://example.invalid/{path.stem}",
-            mime_type="audio/mpeg"))
-        self.deleted: list[str] = []
 
     def run(self, podcast_mode: bool = False) -> str:
         """Audio that fits one chunk is sent as the source file, audio.mp3;
@@ -52,9 +48,6 @@ class TranscribeRun:
             starts = [i * 60_000 for i in range(self.chunks)]
             return paths, [60_000] * self.chunks, 60_000 * self.chunks, starts
 
-        async def upload(client, file_path, mime_type):
-            return self.upload(Path(file_path))
-
         async def inline_part(path, temp_dir, mime_type):
             return types.Part.from_bytes(data=path.name.encode(), mime_type="audio/mpeg")
 
@@ -62,15 +55,11 @@ class TranscribeRun:
                                    metadata=None, podcast_mode=False, label="chunk"):
             return self.answer(source, model)
 
-        async def delete(client, name):
-            self.deleted.append(name)
-
         try:
             with ExitStack() as stack:
-                for name, fake in (("_split_audio", split), ("_upload_file", upload),
+                for name, fake in (("_split_audio", split),
                                    ("_inline_audio_part", inline_part),
                                    ("_transcribe_audio", transcribe_audio),
-                                   ("_delete_file", delete),
                                    ("_get_client", lambda key: object())):
                     stack.enter_context(mock.patch.object(transcriber, name, fake))
                 # Retries back off without sleeping.

@@ -1,4 +1,4 @@
-"""A blocked response moves to the fallback model at once and skips inline audio."""
+"""A blocked response moves to the fallback model at once, without retrying."""
 
 import asyncio
 import logging
@@ -10,7 +10,7 @@ from google.genai import types
 from src.services import transcriber
 from src.utils.retry import FALLBACK_MODEL, ResponseBlockedError
 
-from .support import MODEL, TranscribeRun
+from .support import MODEL, TranscribeRun, inline_chunk_name
 
 TEXT = "这是一段测试转写，用来确认换模型之后能拿到结果，长度也足够通过退化输出检查。"
 
@@ -23,8 +23,7 @@ class _BlockedOn:
         self.calls: list[str] = []
 
     def __call__(self, source, model):
-        kind = "inline" if isinstance(source, types.Part) else "file"
-        self.calls.append(f"{kind}:{model}")
+        self.calls.append(model)
         if model in self.blocked:
             raise ResponseBlockedError(f"Gemini blocked the response on {model} (block_reason=OTHER)")
         return TEXT
@@ -35,17 +34,17 @@ class BlockedResponseTests(unittest.TestCase):
         answer = _BlockedOn({MODEL})
         with self.assertLogs(level=logging.WARNING) as captured:
             self.assertEqual(TranscribeRun(answer).run(), TEXT)
-        self.assertEqual(answer.calls, [f"file:{MODEL}", f"file:{FALLBACK_MODEL}"])
+        self.assertEqual(answer.calls, [MODEL, FALLBACK_MODEL])
         self.assertIn(f"Transcription chunk 1/1: Gemini blocked the response on {MODEL} "
                       f"(block_reason=OTHER); switching to {FALLBACK_MODEL} without retrying",
                       "\n".join(captured.output))
 
-    def test_block_on_both_models_fails_without_the_inline_retry(self):
+    def test_block_on_both_models_fails(self):
         answer = _BlockedOn({MODEL, FALLBACK_MODEL})
         with self.assertLogs(level=logging.WARNING) as captured:
             with self.assertRaises(ResponseBlockedError):
                 TranscribeRun(answer).run()
-        self.assertEqual(answer.calls, [f"file:{MODEL}", f"file:{FALLBACK_MODEL}"])
+        self.assertEqual(answer.calls, [MODEL, FALLBACK_MODEL])
         self.assertIn(f"Transcription chunk 1/1 failed: Gemini blocked the response on "
                       f"{FALLBACK_MODEL}", "\n".join(captured.output))
 
@@ -53,8 +52,8 @@ class BlockedResponseTests(unittest.TestCase):
         failed: list[str] = []
 
         def answer(source, model):
-            if source.name == "files/chunk_001" and not failed:
-                failed.append(source.name)
+            if inline_chunk_name(source) == "chunk_001.mp3" and not failed:
+                failed.append(inline_chunk_name(source))
                 raise ValueError("transient")
             return TEXT
 

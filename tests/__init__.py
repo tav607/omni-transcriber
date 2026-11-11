@@ -9,5 +9,6 @@ test module imports src. Run from the repo root:
 
 import os
 
-os.environ.setdefault("GEMINI_API_KEY", "test-key")
+os.environ["VERTEX_API_KEY"] = "test-key"
+os.environ["VERTEX_PROJECT"] = "test-project"
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:test-token")

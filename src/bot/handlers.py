@@ -36,9 +36,10 @@ settings_store.init()
 # gemini-3.8-flash (the response's model_version says so), so "flash" names
 # the model that actually answers. Chat requests resolve through this table
 # and override TRANSCRIBER_MODEL / EDITOR_MODEL; the Dropbox watcher uses those.
+# "pro" is a concrete id as well: Vertex AI has no -latest aliases.
 MODELS = {
     "flash": "gemini-3.8-flash",
-    "pro": "gemini-pro-latest",
+    "pro": "gemini-3.1-pro-preview",
     "argon": "gemini-4-argon",
 }
 # Which choices /model offers per component.

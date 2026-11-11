@@ -74,7 +74,7 @@ Edit `.env` with your credentials:
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Get from [@BotFather](https://t.me/BotFather) |
-| `GEMINI_API_KEY` | Get from [Google AI Studio](https://aistudio.google.com/apikey) |
+| Vertex AI credentials | Not environment variables by default: the Vertex AI API key goes in `~/.vertex-key` and the GCP project id in `~/.vertex-project` (one bare value per file). `VERTEX_API_KEY` and `VERTEX_PROJECT` override the files when set. |
 
 **Optional:**
 
@@ -88,7 +88,7 @@ Edit `.env` with your credentials:
 | `EDITOR_TEMPERATURE` | `1.0` | Editor temperature |
 | `TRANSCRIBER_THINKING_LEVEL` | `high` | Thinking level: `low`, `medium`, or `high` |
 | `EDITOR_THINKING_LEVEL` | `high` | Thinking level: `low`, `medium`, or `high` |
-| `GOOGLE_GEMINI_BASE_URL` | *(official endpoint)* | Route Gemini through a relay/proxy (read by the google-genai SDK) |
+| `GOOGLE_VERTEX_BASE_URL` | *(official endpoint)* | Route Gemini (Vertex AI) through a relay/proxy (read by the google-genai SDK) |
 | `TEMP_DIR` | `/tmp/omni_transcriber` | Temporary file directory |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `RSSHUB_BASE_URL` | *(empty)* | RSSHub instance URL (required for Xiaoyuzhou) |

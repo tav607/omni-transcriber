@@ -86,7 +86,10 @@ class ResponseBlockedError(Exception):
 # gemini-3.1-pro answered 10 of 10 in the same minute and at the same
 # concurrency. Serial calls fared no better than parallel ones, so no backoff
 # ladder reaches the other side of it.
-FALLBACK_MODEL = "gemini-pro-latest"
+#
+# A concrete id, because Vertex AI has no `-latest` aliases (404); this is the
+# model gemini-pro-latest resolved to on AI Studio.
+FALLBACK_MODEL = "gemini-3.1-pro-preview"
 
 
 async def with_model_fallback(

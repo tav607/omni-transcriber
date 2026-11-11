@@ -13,28 +13,16 @@ from google.genai import types
 
 from ..config import EditorConfig
 from ..utils.chinese import _to_simplified
-from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem
+from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem, get_client, model_path
 from ..utils.retry import with_retry, with_model_fallback
 from .edit_guard import _residual_content, _restore_edit_losses
 from .transcriber import _SPEAKER_TOKEN_RE, _is_cjk_heavy
 
 logger = logging.getLogger(__name__)
 
-# Module-level client cache: reuse genai.Client to avoid recreating HTTP connection pools
-_client_cache: dict[str, genai.Client] = {}
-
-
 def _get_client(api_key: str) -> genai.Client:
-    """Get or create a shared genai.Client for the given API key.
-
-    base_url is left unset so the google-genai SDK's own GOOGLE_GEMINI_BASE_URL
-    environment variable takes effect (its default matches the official
-    endpoint, so behaviour is unchanged unless that variable is set to route
-    Gemini through a relay/proxy).
-    """
-    if api_key not in _client_cache:
-        _client_cache[api_key] = genai.Client(api_key=api_key)
-    return _client_cache[api_key]
+    """The shared Vertex AI client (see utils/gemini.py)."""
+    return get_client(api_key)
 
 
 # Chunk size for transcript editing (characters)
@@ -89,7 +77,7 @@ async def _gemini_generate(
     )
 
     def _generate():
-        return client.models.generate_content(model=model, contents=contents, config=config)
+        return client.models.generate_content(model=model_path(model), contents=contents, config=config)
 
     try:
         response = await asyncio.wait_for(asyncio.to_thread(_generate), timeout=timeout)

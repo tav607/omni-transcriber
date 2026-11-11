@@ -15,7 +15,7 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
   normalized to Simplified script; Japanese is left alone)
 - User settings via Telegram commands:
   - `/model` - Choose AI models for transcription and editing (Argon by default,
-    or Flash/Pro)
+    or Flash)
   - `/translation` - Toggle inline Chinese translation for non-Chinese content
     (applies to podcasts and videos alike)
 
@@ -134,7 +134,7 @@ The bot will reply with:
 
 - `/start` - Welcome message
 - `/help` - Usage instructions
-- `/model` - Choose AI models for the transcriber and the editor (Argon, Flash or Pro)
+- `/model` - Choose AI models for the transcriber and the editor (Argon or Flash)
 - `/translation` - Toggle inline Chinese translation
 
 ## Local Bot API Server (Optional)

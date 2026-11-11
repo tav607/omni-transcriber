@@ -36,16 +36,19 @@ settings_store.init()
 # gemini-3.8-flash (the response's model_version says so), so "flash" names
 # the model that actually answers. Chat requests resolve through this table
 # and override TRANSCRIBER_MODEL / EDITOR_MODEL; the Dropbox watcher uses those.
-# "pro" is a concrete id as well: Vertex AI has no -latest aliases.
+# There is no "pro" choice any more (removed 2026-11-11): it dated from before
+# Argon, read as the top tier while being the weaker model, and in the
+# 2026-08-14 runs 1 of 5 pro transcriptions fabricated 146 words of financial
+# guidance that was never spoken. gemini-3.1-pro-preview lives on only as the
+# automatic fallback (utils/retry.py).
 MODELS = {
     "flash": "gemini-3.8-flash",
-    "pro": "gemini-3.1-pro-preview",
     "argon": "gemini-4-argon",
 }
 # Which choices /model offers per component.
 MODEL_CHOICES = {
-    "transcriber": ("flash", "pro", "argon"),
-    "editor": ("flash", "pro", "argon"),
+    "transcriber": ("flash", "argon"),
+    "editor": ("flash", "argon"),
 }
 
 # Default models: Gemini 4 Argon for both. Transcription moved from 3.8-flash
@@ -56,15 +59,21 @@ MODEL_CHOICES = {
 # blocked in 79 calls (3.8 once) and finished each 15-minute chunk in 39-101s
 # against 48-315s; long audio cost about the same per hour at its introductory
 # $2/$10 per 1M tokens, and costs about twice 3.8's once that doubles on
-# 2026-12-01. Pro is no default: in the 2026-08-14 runs, 1 of 5 pro
-# transcriptions fabricated 146 words of financial guidance that was never
-# spoken. Editing (and the summary/metadata step, which uses the editor model):
+# 2026-12-01. Editing (and the summary/metadata step, which uses the editor model):
 # re-editing three October 2026 expert calls, Argon lost 2-5% of the distinct
 # content words before the fidelity guard, where 3.8-flash lost 4-15%, at about
 # the same cost per call. Chats that picked a model explicitly keep their
-# stored choice.
+# stored choice, unless it names one that is no longer offered.
 DEFAULT_TRANSCRIBER_MODEL = "argon"
 DEFAULT_EDITOR_MODEL = "argon"
+
+
+def _chosen_model(chat_id: int, component: str) -> str:
+    """The chat's stored model key for "transcriber" or "editor", or the
+    default when nothing is stored or the stored key is no longer a choice."""
+    default = DEFAULT_TRANSCRIBER_MODEL if component == "transcriber" else DEFAULT_EDITOR_MODEL
+    key = settings_store.get(chat_id, f"{component}_model", default)
+    return key if key in MODEL_CHOICES[component] else default
 
 # Supported audio MIME types
 AUDIO_MIME_TYPES = [
@@ -232,7 +241,7 @@ async def cmd_help(message: Message):
         "*Audio Files:*\n"
         "Send me an audio file (mp3, m4a, wav, webm, etc.)\n\n"
         "*Settings:*\n"
-        "`/model` - Choose AI models for transcription and editing (Argon by default, or Flash/Pro)\n"
+        "`/model` - Choose AI models for transcription and editing (Argon by default, or Flash)\n"
         "`/translation` - Toggle inline Chinese translation\n\n"
         "*Podcast mode:*\n"
         "Interview / talk-show videos are auto-detected and formatted with "
@@ -324,8 +333,8 @@ async def cmd_model(message: Message):
     chat_id = message.chat.id
 
     # Get current models
-    current_transcriber = settings_store.get(chat_id, "transcriber_model", DEFAULT_TRANSCRIBER_MODEL)
-    current_editor = settings_store.get(chat_id, "editor_model", DEFAULT_EDITOR_MODEL)
+    current_transcriber = _chosen_model(chat_id, "transcriber")
+    current_editor = _chosen_model(chat_id, "editor")
 
     # Build inline keyboard
     keyboard = [
@@ -337,10 +346,6 @@ async def cmd_model(message: Message):
             InlineKeyboardButton(
                 text=f"{'✓ ' if current_transcriber == 'flash' else ''}Flash",
                 callback_data="model_transcriber_flash",
-            ),
-            InlineKeyboardButton(
-                text=f"{'✓ ' if current_transcriber == 'pro' else ''}Pro",
-                callback_data="model_transcriber_pro",
             ),
             InlineKeyboardButton(
                 text=f"{'✓ ' if current_transcriber == 'argon' else ''}Argon",
@@ -355,10 +360,6 @@ async def cmd_model(message: Message):
             InlineKeyboardButton(
                 text=f"{'✓ ' if current_editor == 'flash' else ''}Flash",
                 callback_data="model_editor_flash",
-            ),
-            InlineKeyboardButton(
-                text=f"{'✓ ' if current_editor == 'pro' else ''}Pro",
-                callback_data="model_editor_pro",
             ),
             InlineKeyboardButton(
                 text=f"{'✓ ' if current_editor == 'argon' else ''}Argon",
@@ -404,8 +405,7 @@ async def model_callback(callback: CallbackQuery):
 
     # Update settings
     settings_key = f"{component}_model"
-    default_model = DEFAULT_TRANSCRIBER_MODEL if component == "transcriber" else DEFAULT_EDITOR_MODEL
-    old_model = settings_store.get(chat_id, settings_key, default_model)
+    old_model = _chosen_model(chat_id, component)
 
     if model == old_model:
         # Already selected, just delete the menu
@@ -571,8 +571,8 @@ async def _process_video_url(
     enable_translation = settings_store.get(chat_id, "translation", False)
 
     # Get user model preferences
-    transcriber_model_key = settings_store.get(chat_id, "transcriber_model", DEFAULT_TRANSCRIBER_MODEL)
-    editor_model_key = settings_store.get(chat_id, "editor_model", DEFAULT_EDITOR_MODEL)
+    transcriber_model_key = _chosen_model(chat_id, "transcriber")
+    editor_model_key = _chosen_model(chat_id, "editor")
     transcriber_model = MODELS[transcriber_model_key]
     editor_model = MODELS[editor_model_key]
 
@@ -1095,8 +1095,8 @@ async def _process_audio_file(
     enable_translation = settings_store.get(chat_id, "translation", False)
 
     # Get user model preferences
-    transcriber_model_key = settings_store.get(chat_id, "transcriber_model", DEFAULT_TRANSCRIBER_MODEL)
-    editor_model_key = settings_store.get(chat_id, "editor_model", DEFAULT_EDITOR_MODEL)
+    transcriber_model_key = _chosen_model(chat_id, "transcriber")
+    editor_model_key = _chosen_model(chat_id, "editor")
     transcriber_model = MODELS[transcriber_model_key]
     editor_model = MODELS[editor_model_key]
 

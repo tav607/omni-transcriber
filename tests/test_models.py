@@ -68,9 +68,8 @@ class ModelMenuTests(unittest.TestCase):
         asyncio.run(handlers.cmd_model(message))
         text, kwargs = message.answers[0]
         rows = [[b.callback_data for b in row] for row in kwargs["reply_markup"].inline_keyboard]
-        self.assertEqual(rows[1], ["model_transcriber_flash", "model_transcriber_pro",
-                                   "model_transcriber_argon"])
-        self.assertEqual(rows[3], ["model_editor_flash", "model_editor_pro", "model_editor_argon"])
+        self.assertEqual(rows[1], ["model_transcriber_flash", "model_transcriber_argon"])
+        self.assertEqual(rows[3], ["model_editor_flash", "model_editor_argon"])
         # A chat that never chose a model reads the defaults.
         self.assertIn("Transcriber: *ARGON* (`gemini-4-argon`)", text)
         self.assertIn("Editor: *ARGON* (`gemini-4-argon`)", text)
@@ -94,11 +93,27 @@ class ModelMenuTests(unittest.TestCase):
         self.assertIsNone(settings_store.get(105, "transcriber_model"))
         self.assertEqual(callback.message.answers, [])
 
-    def test_flash_and_pro_still_work_for_both(self):
+    def test_flash_still_works_for_both(self):
         for component in ("transcriber", "editor"):
-            callback = _Callback(f"model_{component}_pro", chat_id=104)
+            callback = _Callback(f"model_{component}_flash", chat_id=104)
             asyncio.run(handlers.model_callback(callback))
-            self.assertEqual(settings_store.get(104, f"{component}_model"), "pro")
+            self.assertEqual(settings_store.get(104, f"{component}_model"), "flash")
+
+    def test_pro_is_no_longer_a_choice(self):
+        self.assertNotIn("pro", handlers.MODELS)
+        callback = _Callback("model_transcriber_pro", chat_id=106)
+        asyncio.run(handlers.model_callback(callback))
+        self.assertIsNone(settings_store.get(106, "transcriber_model"))
+        self.assertEqual(callback.message.answers, [])
+
+    def test_a_stored_pro_choice_reads_as_the_default(self):
+        settings_store.set(107, "transcriber_model", "pro")
+        settings_store.set(107, "editor_model", "pro")
+        self.assertEqual(handlers._chosen_model(107, "transcriber"), "argon")
+        self.assertEqual(handlers._chosen_model(107, "editor"), "argon")
+        message = _Message(chat_id=107)
+        asyncio.run(handlers.cmd_model(message))
+        self.assertIn("Transcriber: *ARGON* (`gemini-4-argon`)", message.answers[0][0])
 
 
 if __name__ == "__main__":

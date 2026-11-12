@@ -1,7 +1,9 @@
 import logging
 import unittest
 
-from src.services import transcriber
+from src.services import editor, transcriber
+
+from .support import run_edit, run_edit_podcast
 
 
 def unify(text: str) -> str:
@@ -41,3 +43,32 @@ class PrefixLabelMergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NormalizeAfterEditTests(unittest.TestCase):
+    """Edit chunks are edited independently, so numbered labels are renumbered
+    by first appearance once the edited chunks are joined."""
+
+    def test_gaps_are_closed_in_order_of_first_appearance(self):
+        text = "**Speaker 3:** a\n**Speaker 1:** b\n**Speaker 3:** c"
+        self.assertEqual(editor._normalize_speaker_labels(text),
+                         "**Speaker 1:** a\n**Speaker 2:** b\n**Speaker 1:** c")
+
+    def test_a_swap_does_not_collapse_two_speakers(self):
+        text = "**Speaker 2:** a\n**Speaker 1:** b\n**Speaker 2:** c"
+        self.assertEqual(editor._normalize_speaker_labels(text),
+                         "**Speaker 1:** a\n**Speaker 2:** b\n**Speaker 1:** c")
+
+    def test_named_and_role_labels_are_left_alone(self):
+        text = "**Host:** a\n**张三:** b\n**Guest:** c\n**Speaker 1:** d"
+        self.assertEqual(editor._normalize_speaker_labels(text), text)
+
+    def test_both_edit_paths_normalize(self):
+        raw = ("**Speaker 2:** " + "我们今年的收入增长主要来自企业客户的续约和扩容。" * 3 + "\n\n"
+               "**Speaker 1:** " + "那明年的指引大概是什么水平，能不能展开讲一下。" * 3)
+        meta = {"title": "t", "summary": "s", "key_points": ["k"], "takeaways": ["k"],
+                "qa_pairs": [], "highlights": []}
+        generic = run_edit(raw, lambda chunk: chunk, meta)
+        podcast = run_edit_podcast(raw, lambda chunk: chunk, meta)
+        for out in (generic, podcast.full_transcript):
+            self.assertLess(out.index("**Speaker 1:** 我们今年"), out.index("**Speaker 2:** 那明年"))

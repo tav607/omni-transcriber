@@ -15,8 +15,13 @@ from ..config import EditorConfig
 from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem, get_client, model_path
 from ..utils.retry import with_retry, with_model_fallback
-from .edit_guard import _residual_content, _restore_edit_losses
-from .transcriber import _SPEAKER_TOKEN_RE, _is_cjk_heavy
+from .edit_guard import _number_changes, _residual_content, _restore_edit_losses
+from .transcriber import (
+    _SPEAKER_TOKEN_RE,
+    _is_cjk_heavy,
+    _unify_prefix_name_labels,
+    _unify_short_name_labels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +115,59 @@ async def _guard_edit(raw: str, edited: str, index: int, restored_spans: List[in
         logger.info(
             f"Edit chunk {index + 1}: put back {restored} span(s) the editor dropped or reworded"
         )
+    # What the guard could not put back still gets reported: a figure that
+    # vanished or appeared between the raw chunk and the final edit.
+    dropped, added = _number_changes(raw, edited)
+    if dropped or added:
+        logger.warning(
+            f"Editor changed numbers in chunk {index + 1}: "
+            f"dropped {', '.join(dropped) or '-'}; introduced {', '.join(added) or '-'}"
+        )
     return edited
+
+
+# Generic turn labels the transcription prompt falls back to when no name is known.
+_SPEAKER_LABEL_PATTERN = re.compile(r'\*\*(?:Speaker\s*\d+|Host|Guest\s*\d*)\s*[:：]\*\*', re.IGNORECASE)
+
+
+def _normalize_speaker_labels(transcript: str) -> str:
+    """Unify speaker labels across chunks so the same person keeps the same label.
+
+    First merges first-name-only labels into their unique full-name counterpart
+    and shortened first names into the full form (the merge step does this on
+    the raw transcript, but the editor can upgrade or shorten labels again),
+    then renumbers **Speaker N:** labels in order of first appearance so gaps
+    and duplicates left by independently edited chunks disappear. Named labels
+    are left alone. From the transcribe skill.
+    """
+    transcript = _unify_short_name_labels(transcript)
+    transcript = _unify_prefix_name_labels(transcript)
+
+    labels_in_order: list[str] = []
+    seen: set[str] = set()
+    for m in _SPEAKER_LABEL_PATTERN.finditer(transcript):
+        label = m.group(0)
+        key = label.lower()
+        if key not in seen:
+            seen.add(key)
+            labels_in_order.append(label)
+
+    generic = [label for label in labels_in_order if re.search(r'Speaker\s*\d+', label, re.IGNORECASE)]
+    if len(generic) <= 1:
+        return transcript
+
+    remap: dict[str, str] = {}
+    for idx, label in enumerate(generic):
+        canonical = f"**Speaker {idx + 1}:**"
+        if label != canonical:
+            remap[label] = canonical
+    if not remap:
+        return transcript
+
+    # Single-pass substitution: sequential str.replace would re-hit its own
+    # output when the remap is a permutation (e.g. {S2->S1, S1->S2}) and
+    # collapse two speakers into one label.
+    return _SPEAKER_LABEL_PATTERN.sub(lambda m: remap.get(m.group(0), m.group(0)), transcript)
 
 
 def _log_edit_guard_total(restored_spans: List[int]) -> None:
@@ -715,8 +772,8 @@ RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task 
 
 1. **修正转录错误**：
    - 修正明显的语音转文字错误（音近字、同音字）
-   - 修正专业术语、公司名称、人名的转录错误
-   - 保留专有名词、产品名称、版本号、技术术语的原样
+   - 不要改动专有名词、产品名称、版本号、技术术语
+   - 绝对不要改动数字及其量级（金额、万/亿、million/billion、百分比、估值、数量、日期、年份）：即使某个数字听起来奇怪或与上下文其他数字冲突，也按转录原样保留，不要为了“讲得通”而修改
 
 2. **移除填充词**：
    - 移除中文填充词：嗯、啊、呃、额、哦、唔、那个、就是、然后、对对对、是是是
@@ -726,6 +783,7 @@ RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task 
 3. **格式规范**：
    - 适当分段提高可读性
    - 按说话人变化或话题变化自然分段
+   - 如果原始转录带有说话人标签（**Name:** / **Speaker 1:**），保留它们：标签保持在发言开头，同一个人始终用同一个标签，不要重新编号
    - 移除重复的口吃表达
 
 4. **保持完整**：
@@ -742,6 +800,8 @@ RAW_EDIT_SYSTEM_PROMPT = """You are a professional transcript editor. Your task 
 - 必须输出完整内容，不能省略任何部分
 - 不要添加任何前言或总结
 - 直接输出编辑后的转录文本
+- 绝对不要输出类似 "It appears that" 或 "Please provide" 的错误提示
+- 即使输入看起来不完整，也要直接编辑并输出可用内容
 """
 
 # Raw transcript editing prompt WITH context (for YouTube/Bilibili with metadata)
@@ -755,8 +815,8 @@ Use the video information provided to help identify correct speaker names, chann
 1. **修正转录错误**：
    - 修正明显的语音转文字错误（音近字、同音字）
    - 修正说话人名字错误（根据元数据中的频道名和描述推断正确名字）
-   - 修正专业术语、公司名称、人名的转录错误
-   - 保留专有名词、产品名称、版本号、技术术语的原样
+   - 不要改动产品名称、版本号、技术术语
+   - 绝对不要改动数字及其量级（金额、万/亿、million/billion、百分比、估值、数量、日期、年份）：即使某个数字听起来奇怪或与上下文其他数字冲突，也按转录原样保留，不要为了“讲得通”而修改
 
 2. **移除填充词**：
    - 移除中文填充词：嗯、啊、呃、额、哦、唔、那个、就是、然后、对对对、是是是
@@ -766,6 +826,7 @@ Use the video information provided to help identify correct speaker names, chann
 3. **格式规范**：
    - 适当分段提高可读性
    - 按说话人变化或话题变化自然分段
+   - 如果原始转录带有说话人标签（**Name:** / **Speaker 1:**），保留它们：标签保持在发言开头，同一个人始终用同一个标签，不要重新编号
    - 移除重复的口吃表达
 
 4. **保持完整**：
@@ -782,6 +843,8 @@ Use the video information provided to help identify correct speaker names, chann
 - 必须输出完整内容，不能省略任何部分
 - 不要添加任何前言或总结
 - 直接输出编辑后的转录文本
+- 绝对不要输出类似 "It appears that" 或 "Please provide" 的错误提示
+- 即使输入看起来不完整，也要直接编辑并输出可用内容
 """
 
 # Speaker-turn boundary: a newline before a "Name:" label. First branch is the
@@ -964,6 +1027,9 @@ async def edit(
 
     # Combine edited chunks (a dropped markup-only chunk comes back empty)
     edited_transcript = "\n\n".join(c for c in edited_chunks if c.strip())
+    # Uploaded recordings and watcher files are transcribed with speaker
+    # labels and edited here; a no-op on unlabeled single-track video.
+    edited_transcript = _normalize_speaker_labels(edited_transcript)
 
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
@@ -1200,7 +1266,9 @@ Use the episode information provided to help identify correct speaker names and 
    - 修正明显的语音转文字错误（音近字、同音字）
    - 修正说话人名字错误（根据元数据中的播客名和描述推断正确名字）
    - 例如：如果播客名是"张小珺商业访谈录"，说话人应该是"张小珺"而非"张小军"、"张小钧"等
-   - 修正专业术语、公司名称、人名的转录错误
+   - 人名、公司名只有在元数据上下文有力支持时才修正
+   - 绝对不要改动数字及其量级（金额、万/亿、million/billion、百分比、估值、数量、日期、年份）：即使某个数字听起来奇怪或与上下文其他数字冲突，也按转录原样保留，不要为了“讲得通”而修改
+   - 产品名称、版本号、技术术语保持原样，除非明显是转录乱码
 
 2. **移除填充词**：
    - 移除中文填充词：嗯、啊、呃、额、哦、唔、那个、就是、然后、对对对、是是是
@@ -1208,11 +1276,14 @@ Use the episode information provided to help identify correct speaker names and 
    - 保留有实际语义的语气词和感叹词
 
 3. **格式规范**：
-   - 按说话人分段，格式为 **说话人名:** 后跟内容
+   - 原始转录通常带有听音频时标注的说话人标签（**Name:** / **Host:** / **Guest:** / **Speaker 1:**）。保留它们：标签保持在发言开头，同一个人始终用同一个标签；当元数据或对话内容能明确身份时，把泛型标签升级为真名
+   - 如果某段（或整篇）没有标签，按同样的 **Name:** / **Host:** / **Guest:** / **Speaker N:** 约定补上
    - 移除时间戳（如 **00:00**、**01:23** 等）
    - 适当分段提高可读性，每个说话人的发言可以分为多段
 
-4. **保持完整**：
+4. **跨块一致性**：本块可能只是长转录的一部分，各块独立编辑，标签不能依赖其他块的选择。给未标注的发言分配新标签时，优先用稳定的：真名最优，其次角色型 **Host:** / **Guest:**，编号型 **Speaker N:** 只作最后手段。绝对不要重新编号或改写已存在的标签
+
+5. **保持完整**：
    - 输出完整内容，绝对不要截断或省略任何部分
    - 保持原语言，不要翻译
    - 保留技术术语、专有名词、公司名称
@@ -1386,6 +1457,9 @@ async def edit_podcast(
 
     # Combine edited chunks (filter out any remaining empty strings)
     edited_transcript = "\n\n".join(c for c in edited_chunks if c.strip())
+    # Labels originate per audio chunk and each edit chunk is edited on its
+    # own, so this runs even when the text fit in a single edit chunk.
+    edited_transcript = _normalize_speaker_labels(edited_transcript)
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
     # ============================================

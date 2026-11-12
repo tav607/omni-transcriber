@@ -67,6 +67,7 @@ All config via environment variables (see `.env.example`). Key settings:
 - `TRANSCRIBER_THINKING_LEVEL` / `EDITOR_THINKING_LEVEL` - Gemini native thinking_level: "low", "medium", or "high" (both default "high"; metadata generation is always "high", translation/glossary always "low")
 - `TELEGRAM_ALLOWED_CHAT_IDS` - Comma-separated list for access control
 - `RSSHUB_BASE_URL` / `RSSHUB_KEY` - Required for Xiaoyuzhou podcast support
+- `YOUTUBE_SOURCE_ADDRESS` - Local address yt-dlp binds to for YouTube requests only (`_youtube_egress_opts` in `downloader.py`). YouTube answers every request from gcp-vm's Google address with "Sign in to confirm you're not a bot" (first seen 2026-11-12; a JS runtime and other player clients did not change it), so on gcp-vm this is the WARP tunnel's address `172.16.0.2`, and `/etc/wireguard/warp.conf` carries a matching `ip rule ... from 172.16.0.2 lookup 51888`. Without that rule the bind sends packets out the default interface and every YouTube request times out. The same error with the variable set means the WARP exit is blocked too. yt-dlp needs a JavaScript runtime for YouTube, which the `deno` dependency puts in `.venv/bin`; the service must be started through `uv run` (or with `.venv/bin` on `PATH`) for yt-dlp to find it.
 - `TELEGRAM_API_SERVER` - Local Bot API server URL (optional, for files > 20MB)
 
 ### Local Bot API Server (Optional)

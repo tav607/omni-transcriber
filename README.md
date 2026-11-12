@@ -188,7 +188,7 @@ Every `CONTEXT.md` from the watch folder root down to the audio file's folder ap
 | `output_folder` | subfolder path | Subfolder of `DROPBOX_OUTPUT_FOLDER` for this folder's notes. |
 | `sections` | list, see below | The note's sections, replacing the mode's defaults. |
 
-Each entry of `sections` has a `key`, a `prompt` saying what to write, an optional `type` (`list`, the default; `text`; `qa` for question and answer pairs) and an optional `heading`:
+Each entry of `sections` has a `key`, a `prompt` saying what to write, an optional `type` (`list`, the default; `text`; `qa` for question and answer pairs) and an optional `heading`. The step that writes the sections is told the audio file's name and recording date, so a prompt can refer to them (for example a title prompt that keeps a file name which is already a title):
 
 ```yaml
 sections:

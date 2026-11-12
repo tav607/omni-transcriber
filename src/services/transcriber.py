@@ -146,6 +146,150 @@ PODCAST_SPEAKER_GUIDELINE = (
 # numbered labels onto a single-presenter talk adds noise.
 GENERIC_SPEAKER_GUIDELINE = "- Include speaker changes when clearly identifiable"
 
+# The guidelines below serve the Dropbox watcher's CONTEXT.md settings (mode,
+# roles, participants). All but the participants rule are the transcribe
+# skill's, word for word.
+NAME_LABEL_RULE = (
+    "Once a speaker's full name is known from the context or audio, use the FULL "
+    "name in every label (**Jane Doe:**, not **Jane:**; first names can collide). "
+    "Write names in the language of the audio: for Chinese audio use Chinese "
+    "characters (e.g. **张三:**, never pinyin or other romanization), for English "
+    "audio use the Latin spelling. The names in these examples are placeholders "
+    "showing the format only; never use them as a speaker label"
+)
+
+EARNINGS_SPEAKER_GUIDELINE = (
+    "- Label every speaker turn: **Operator:** for the conference operator, and the "
+    "speaker's real name (e.g. **Jane Doe:**) for executives and analysts. The "
+    "operator or IR host announces each speaker by name (executives are introduced "
+    "in the opening remarks, analysts when their question is called), so prefer real "
+    "names; fall back to **Speaker 1:**, **Speaker 2:** only when a name is never "
+    "given. Keep each person's label consistent for the whole audio. " + NAME_LABEL_RULE
+)
+
+MEETING_SPEAKER_GUIDELINE = (
+    "- This is a recording of a meeting or a call. Label every speaker turn: start the "
+    "turn with **Name:** when a participant is introduced or addressed by name, otherwise "
+    "**Speaker 1:**, **Speaker 2:** in order of first appearance. Distinguish speakers by "
+    "their voices and keep each person's label consistent for the whole audio. " + NAME_LABEL_RULE
+)
+
+CODE_SWITCH_RULE = (
+    "\n- Keep words spoken in English (names, products, technical terms, acronyms) in "
+    "their original Latin spelling as heard; never transliterate them into Chinese "
+    "characters and never translate them"
+)
+
+
+@dataclass(frozen=True)
+class Labeling:
+    """How speaker turns are labeled, from a CONTEXT.md.
+
+    mode picks the guideline: "meeting", "earnings" or "generic" (speaker
+    changes only where obvious). roles is a fixed label roster for an
+    interview, asking side first and the answering side last; it replaces the
+    mode's guideline. participants are (name, description) pairs of the people
+    expected on the recording, added to the guideline as a hint.
+    """
+    mode: str = "meeting"
+    roles: tuple[str, ...] = ()
+    participants: tuple[tuple[str, str], ...] = ()
+
+
+def _speaker_roster_guideline(speakers: tuple[str, ...]) -> str:
+    """Speaker rule for a fixed label roster (the skill's --speakers).
+
+    Interviews are labeled by role because the roles are what the reader needs
+    and what the model can infer from content (who asks, who answers). Free
+    labeling put Speaker 1/2 on each 15-minute chunk independently, and three
+    October 2026 expert calls had the two numbers swapped from one chunk
+    onward. Real names are ruled out because expert identities are often
+    withheld on purpose.
+    """
+    labels = ", ".join(f"**{s}:**" for s in speakers)
+    if len(speakers) == 2:
+        roles = (f"**{speakers[0]}:** is the side asking the questions (the interviewer) "
+                 f"and **{speakers[1]}:** is the side answering them (the interviewee)")
+    else:
+        askers = ", ".join(f"**{s}:**" for s in speakers[:-1])
+        roles = (f"{askers} are the interviewer side, told apart by voice, and "
+                 f"**{speakers[-1]}:** is the interviewee")
+    return (
+        f"- Label every speaker turn with exactly one of these labels and no other: {labels}. "
+        f"{roles}. Decide each turn by what is said and by the voice, and keep the assignment "
+        "consistent for the whole audio. Never replace these labels with real names, even "
+        "when a name is mentioned"
+    )
+
+
+def _participants_rule(participants: tuple[tuple[str, str], ...]) -> str:
+    """Names the folder's CONTEXT.md expects on the recording. A hint, not a
+    roster: someone on the list may be absent and someone off it may speak.
+    Not from the skill, and not measured against real recordings yet."""
+    people = "; ".join(f"**{name}:** ({desc})" if desc else f"**{name}:**" for name, desc in participants)
+    return (
+        f"\n- Expected participants and their labels: {people}. Once the context or the voice "
+        "identifies a speaker as one of them, label that speaker's turns with exactly this "
+        "label, spelled as given. Not everyone listed has to be present, and anyone not "
+        "listed keeps the labeling rule above"
+    )
+
+
+def _speaker_guideline(podcast_mode: bool, labeling: Optional[Labeling]) -> str:
+    if labeling is None:
+        return PODCAST_SPEAKER_GUIDELINE if podcast_mode else GENERIC_SPEAKER_GUIDELINE
+    if labeling.roles:
+        guideline = _speaker_roster_guideline(labeling.roles)
+    elif labeling.mode == "earnings":
+        guideline = EARNINGS_SPEAKER_GUIDELINE
+    elif labeling.mode == "meeting":
+        guideline = MEETING_SPEAKER_GUIDELINE
+    else:
+        guideline = GENERIC_SPEAKER_GUIDELINE
+    if labeling.participants and not labeling.roles:
+        guideline += _participants_rule(labeling.participants)
+    if labeling.mode == "meeting":
+        guideline += CODE_SWITCH_RULE
+    return guideline
+
+
+# A two-party interview chunk is treated as swapped when the answering side
+# asks clearly more questions than the asking side. Interviewer turns usually
+# carry a question mark and answers rarely do, so the gap in a swapped chunk is
+# large; requiring a few turns on each side keeps short chunks from flapping.
+ROLE_SWAP_MIN_TURNS = 3
+ROLE_SWAP_MIN_GAP = 0.3
+
+
+def _fix_role_swap(text: str, asker: str, answerer: str) -> tuple[str, bool]:
+    """Swap the two roster labels in a chunk whose question pattern is inverted.
+
+    Returns (text, swapped). Only labels at the start of a line count as turns,
+    and labels outside the roster are left alone. From the transcribe skill.
+    """
+    matches = list(_NAMED_LABEL_RE.finditer(text))
+    turns = {asker: 0, answerer: 0}
+    asking = {asker: 0, answerer: 0}
+    for i, m in enumerate(matches):
+        label = m.group(1).strip()
+        if label not in turns:
+            continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        turns[label] += 1
+        if re.search(r"[?？]", text[m.end():end]):
+            asking[label] += 1
+    if min(turns.values()) < ROLE_SWAP_MIN_TURNS:
+        return text, False
+    if asking[answerer] / turns[answerer] - asking[asker] / turns[asker] < ROLE_SWAP_MIN_GAP:
+        return text, False
+    other = {asker: answerer, answerer: asker}
+
+    def _sub(m: re.Match) -> str:
+        label = m.group(1).strip()
+        return m.group(0).replace(label, other[label], 1) if label in other else m.group(0)
+
+    return _NAMED_LABEL_RE.sub(_sub, text), True
+
 
 @dataclass
 class TranscriptionMetadata:
@@ -226,15 +370,17 @@ def is_podcast_video(title: str, channel: str = "", description: str = "") -> bo
 def _build_transcription_prompt(
     metadata: Optional[TranscriptionMetadata],
     podcast_mode: bool = False,
+    labeling: Optional[Labeling] = None,
 ) -> str:
     """Build the transcription prompt.
 
     podcast_mode selects the speaker-labeling guideline (strong role/name labels
     vs. gentle) by content form, independently of whether metadata is present:
     audio with no metadata still gets speaker labels, while a plain video does
-    not get the forced role/numbered labels.
+    not get the forced role/numbered labels. labeling (a watched folder's
+    CONTEXT.md settings) takes the choice over from podcast_mode.
     """
-    if metadata is None and not podcast_mode:
+    if metadata is None and not podcast_mode and labeling is None:
         return TRANSCRIPTION_PROMPT
 
     # Build metadata section
@@ -272,7 +418,7 @@ def _build_transcription_prompt(
 
     return PODCAST_TRANSCRIPTION_PROMPT_TEMPLATE.format(
         metadata_section="\n".join(metadata_lines),
-        speaker_guideline=PODCAST_SPEAKER_GUIDELINE if podcast_mode else GENERIC_SPEAKER_GUIDELINE,
+        speaker_guideline=_speaker_guideline(podcast_mode, labeling),
         date_anchor=date_anchor,
     )
 
@@ -866,6 +1012,7 @@ async def transcribe(
     metadata: Optional[TranscriptionMetadata] = None,
     on_status: Callable[[str], None] | None = None,
     podcast_mode: bool = False,
+    labeling: Optional[Labeling] = None,
 ) -> str:
     """
     Transcribe audio file using Gemini API.
@@ -879,6 +1026,8 @@ async def transcribe(
         podcast_mode: Content form of the source. True for conversational audio
             (podcasts, meetings, uploaded recordings), which gets strong speaker
             labels even without metadata; False for single-track video.
+        labeling: Speaker-labeling settings from a watched folder's CONTEXT.md;
+            when given, it decides the labeling instead of podcast_mode.
 
     Returns:
         The transcribed text
@@ -943,6 +1092,7 @@ async def transcribe(
                                 metadata,
                                 podcast_mode,
                                 label=label,
+                                labeling=labeling,
                             )
                     return _attempt
                 return _attempt_on
@@ -1033,6 +1183,18 @@ async def transcribe(
             # before the merge, so a chunk that came back traditional cannot leave
             # the transcript mixing scripts.
             transcripts = [_to_simplified(cleanup_repetitive_characters(t)) for t in transcripts]
+            # A two-label interview roster: a chunk whose question pattern shows
+            # the two labels the wrong way round is swapped back.
+            if labeling is not None and len(labeling.roles) == 2:
+                asker, answerer = labeling.roles
+                for i, text in enumerate(transcripts):
+                    transcripts[i], swapped = _fix_role_swap(text, asker, answerer)
+                    if swapped:
+                        logger.warning(
+                            f"Speaker roster: chunk {i + 1}/{len(transcripts)} had {asker} and "
+                            f"{answerer} swapped (the answering side asked most of the "
+                            "questions); swapped them back"
+                        )
 
             if len(transcripts) == 1:
                 return transcripts[0]
@@ -1095,12 +1257,13 @@ async def _transcribe_audio(
     metadata: Optional[TranscriptionMetadata] = None,
     podcast_mode: bool = False,
     label: str = "chunk",
+    labeling: Optional[Labeling] = None,
 ) -> str:
     """Transcribe audio using Gemini model."""
     logger.info(f"Transcribing {label} on {model}...")
 
     # Build prompt with or without metadata context
-    prompt = _build_transcription_prompt(metadata, podcast_mode)
+    prompt = _build_transcription_prompt(metadata, podcast_mode, labeling)
 
     def _generate():
         return client.models.generate_content(

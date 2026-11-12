@@ -396,3 +396,44 @@ def _restore_edit_losses(raw: str, edited: str) -> tuple[str, int]:
     for start, end, text in sorted(patches, reverse=True):
         edited = edited[:start] + text + edited[end:]
     return edited, len(patches)
+
+
+# The edit prompts forbid touching numbers, but an LLM editor still "fixes" a
+# figure that clashes with its neighbours (a "40亿" valuation next to
+# "1000万融完" came back as "4000万"). So every edited chunk is diffed against
+# its raw input on number tokens, and any value that vanished or appeared is
+# reported. Set semantics, not counts: stutter removal ("25年年初，25年年初")
+# drops duplicates without changing a value. From the transcribe skill
+# (tav607/my-claude-skills e21944b).
+_NUM_SCALE = r"(?:%|万|亿|千|百|million|billion|thousand|[kmb](?![a-z]))"
+_NUM_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?" + _NUM_SCALE + "?", re.IGNORECASE)
+_CN_PERCENT_RE = re.compile(r"百分之(" + _CN_NUM_RUN.pattern + r"|\d+(?:\.\d+)?)")
+
+
+def _number_tokens(text: str) -> set[str]:
+    """Distinct numeric values in a transcript span, folded so that spoken and
+    digit forms of the same value compare equal ("百分之零点五" = "0.5%",
+    "四十亿" = "40 亿", "4,000" = "4000"). Bare single digits are skipped: they
+    are mostly 一个/一下-style words, and a lone digit carries no figure."""
+    text = _TIMESTAMP_RE.sub("", text)
+    text = _CN_PERCENT_RE.sub(lambda m: _cn_numerals_to_digits(m.group(1)) + "%", text)
+    text = _cn_numerals_to_digits(text)
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
+    # "2.8 个亿" / "14个 million": the measure word sits between value and scale.
+    text = re.sub(r"(\d)\s*(?:个\s*)?(?=" + _NUM_SCALE + ")", r"\1", text, flags=re.IGNORECASE)
+    tokens = set()
+    for m in _NUM_TOKEN_RE.finditer(text):
+        tok = m.group().lower()
+        # "$5.2B" and "$5.2 billion" are one value.
+        tok = re.sub(r"(million|billion|thousand)$",
+                     lambda s: {"million": "m", "billion": "b", "thousand": "k"}[s.group()], tok)
+        digits = re.match(r"[\d.]+", tok).group()
+        if tok != digits or len(digits.replace(".", "")) >= 2:
+            tokens.add(tok)
+    return tokens
+
+
+def _number_changes(raw: str, edited: str) -> tuple[list[str], list[str]]:
+    """(values the editor dropped, values it introduced), each sorted."""
+    before, after = _number_tokens(raw), _number_tokens(edited)
+    return sorted(before - after), sorted(after - before)

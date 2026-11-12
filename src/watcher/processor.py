@@ -19,7 +19,7 @@ from aiogram import Bot
 from aiogram.types import FSInputFile
 
 from ..config import AppConfig, DropboxWatcherConfig
-from ..services.transcriber import transcribe, TranscriptionMetadata
+from ..services.transcriber import transcribe, TranscriptionMetadata, recording_date
 from ..services.editor import edit
 from ..services.pdf_generator import generate_pdf
 from .context_loader import ContextConfig
@@ -289,14 +289,18 @@ async def process_audio_file(
         await update_status(f"🎙 Transcribing audio...\n<code>{escaped_path}</code>")
         logger.info("Starting transcription...")
 
-        # Create metadata from background if available
-        transcription_metadata = None
+        # A watched file always gets transcription metadata, CONTEXT.md
+        # background or not: the date is what anchors spoken years (see
+        # recording_date).
+        recorded, date_is_upper_bound = recording_date(filename)
+        transcription_metadata = TranscriptionMetadata(
+            source_name="Dropbox Recording",
+            title=base_name,
+            publish_date=recorded,
+            description=context.background or "",
+            date_is_upper_bound=date_is_upper_bound,
+        )
         if context.background:
-            transcription_metadata = TranscriptionMetadata(
-                source_name="Dropbox Recording",
-                title=base_name,
-                description=context.background,
-            )
             logger.info("Using background context from CONTEXT.md for transcription")
 
         raw_transcript = await transcribe(

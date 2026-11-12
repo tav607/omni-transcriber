@@ -2,6 +2,7 @@
 
 import array
 import asyncio
+import datetime
 import re
 import logging
 import math
@@ -35,6 +36,22 @@ MAX_DURATION_MINUTES = 15
 OVERLAP_SECONDS = 10
 MAX_DURATION_MS = MAX_DURATION_MINUTES * 60 * 1000  # in milliseconds
 OVERLAP_MS = OVERLAP_SECONDS * 1000  # 10 seconds in milliseconds
+
+# When Gemini's recitation filter blocks a chunk (the output matches published
+# text: a book reading, a famous speech), the whole audio is cut again into
+# chunks this long and transcribed once more; a shorter verbatim stretch is
+# less likely to trip the filter. Same values as the transcribe skill and
+# podcast-tracker-transcriber.
+RECITATION_FALLBACK_MINUTES = 10
+RECITATION_FALLBACK_MS = RECITATION_FALLBACK_MINUTES * 60 * 1000
+
+
+class TranscriptionBlockedError(Exception):
+    """Gemini refused to return the transcript (finish_reason=RECITATION).
+
+    Deterministic for a given (model, audio) pair, so retries and the model
+    switch are skipped; transcribe() answers it by re-splitting the audio into
+    RECITATION_FALLBACK_MINUTES chunks."""
 
 # Chunks are cut in a pause (backported from the transcribe skill, which
 # measured the numbers below). Within the minute before each 15-minute mark the
@@ -142,6 +159,9 @@ class TranscriptionMetadata:
     title: str  # Episode title or Video title
     publish_date: str = ""
     description: str = ""  # Episode shownotes or Video description
+    # True when publish_date is only the latest the recording can be (the day
+    # an uploaded file arrived), so the prompt says "on or before".
+    date_is_upper_bound: bool = False
 
     # Legacy aliases for backward compatibility
     @property
@@ -155,6 +175,34 @@ class TranscriptionMetadata:
     @property
     def shownotes(self) -> str:
         return self.description
+
+
+_FILENAME_DATE_RE = re.compile(r"(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])")
+
+
+def recording_date(filename: str, received: datetime.date | None = None) -> tuple[str, bool]:
+    """(date, is_upper_bound) for an uploaded or watched audio file, so its
+    transcription prompt gets a year anchor like a podcast episode's.
+
+    A YYYY-MM-DD / YYYYMMDD run in the filename is taken as the recording date
+    (FactSet/CIQ exports look like "..._Earnings Call_2026-08-11T00_00_00_English.mp3").
+    Otherwise the day the file arrived stands in: the recording can only be
+    older than that, so it is marked as an upper bound and worded that way in
+    the prompt. Same rule as the transcribe skill's _local_file_metadata, with
+    the arrival day in place of the file's modification time. A filename date
+    later than the arrival day is not a recording date and is ignored (with a
+    day of slack: Telegram reports the arrival in UTC, the filename is local).
+    """
+    received = received or datetime.date.today()
+    m = _FILENAME_DATE_RE.search(filename)
+    if m:
+        try:
+            found = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            found = None
+        if found is not None and found <= received + datetime.timedelta(days=1):
+            return found.isoformat(), False
+    return received.isoformat(), True
 
 
 # A YouTube/Bilibili video whose metadata reads like a podcast (interview,
@@ -209,7 +257,13 @@ def _build_transcription_prompt(
     # per variant: no metadata 4/12 drifted, title + date lines alone 4/12,
     # this explicit rule 0/12. The date line by itself does not protect.
     date_anchor = ""
-    if metadata is not None and metadata.publish_date:
+    if metadata is not None and metadata.publish_date and metadata.date_is_upper_bound:
+        date_anchor = (
+            f"\n- This recording was made on or before {metadata.publish_date}. Transcribe every spoken year exactly as heard; "
+            f"never shift a year, quarter, or product generation to an earlier one from memory. "
+            f"Names and products that sound unfamiliar may be newer than your knowledge; write them as heard."
+        )
+    elif metadata is not None and metadata.publish_date:
         date_anchor = (
             f"\n- This recording is dated {metadata.publish_date}. Transcribe every spoken year exactly as heard; "
             f"never shift a year, quarter, or product generation to an earlier one from memory. "
@@ -226,9 +280,12 @@ def _build_transcription_prompt(
 MIME_TYPES = {
     ".mp3": "audio/mpeg",
     ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
     ".wav": "audio/wav",
     ".webm": "audio/webm",
     ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".aac": "audio/aac",
     ".flac": "audio/flac",
 }
 
@@ -812,7 +869,7 @@ async def transcribe(
 ) -> str:
     """
     Transcribe audio file using Gemini API.
-    Supports automatic chunking for audio longer than 45 minutes.
+    Audio longer than 15 minutes is split into chunks cut in a pause.
 
     Args:
         audio_path: Path to the audio file to transcribe
@@ -868,13 +925,6 @@ async def transcribe(
         ext = audio_path_obj.suffix.lower()
         mime_type = MIME_TYPES.get(ext, "audio/mpeg")
 
-        # Transcribe all chunks in parallel, each with its audio inlined in the request
-        if on_status:
-            if len(chunk_paths) > 1:
-                on_status(f"Transcribing {len(chunk_paths)} chunks in parallel...")
-            else:
-                on_status("Transcribing...")
-
         async def transcribe_chunk(chunk_path: Path, duration_s: float, label: str) -> str:
             # `label` ("chunk 2/4") goes into every log line, so a failure names
             # the request it came from. Gate around the call, outside
@@ -905,6 +955,7 @@ async def transcribe(
                 return await with_model_fallback(
                     _attempts_from(part), config.model,
                     context=f"Transcription {label}",
+                    non_retryable_exceptions=(TranscriptionBlockedError,),
                 )
 
             # Degenerate-output guard: a chunk that transcribes to almost nothing
@@ -919,6 +970,9 @@ async def transcribe(
             for attempt in range(1, TRANSCRIPTION_SHORT_RETRIES + 1):
                 try:
                     text = await _one_pass()
+                except TranscriptionBlockedError:
+                    # Straight to the re-split below; nothing here can clear it.
+                    raise
                 except Exception as error:
                     # Logged here because the gather below raises only the first error.
                     logger.error(f"Transcription {label} failed: {error}")
@@ -938,43 +992,81 @@ async def transcribe(
             )
             return text
 
-        transcribe_tasks = [
-            transcribe_chunk(p, d, f"chunk {i + 1}/{len(chunk_paths)}")
-            for i, (p, d) in enumerate(zip(chunk_paths, chunk_durations_s))
-        ]
-        # Settle every chunk before raising: a bare gather propagates the first
-        # failure while sibling transcriptions are still in flight, and the
-        # finally block would then remove the chunk files out from under them
-        # (each orphan keeps retrying while holding a shared Gemini slot).
-        # return_exceptions=True lets them all finish first; a cancellation
-        # propagates, otherwise the first real error is raised (one chunk
-        # failing still fails the whole run).
-        results = await asyncio.gather(*transcribe_tasks, return_exceptions=True)
-        cancelled = next(
-            (r for r in results if isinstance(r, asyncio.CancelledError)), None
-        )
-        if cancelled is not None:
-            raise cancelled
-        errors = [r for r in results if isinstance(r, BaseException)]
-        if errors:
-            raise errors[0]
-        transcripts = list(results)
-        logger.info(f"Transcribed {len(transcripts)} chunks")
+        async def _run_pipeline(
+            paths: List[Path], durations_s: List[float], overlaps_s: List[float]
+        ) -> str:
+            """Transcribe every chunk in parallel, each with its audio inlined
+            in the request, then clean up and merge."""
+            if on_status:
+                if len(paths) > 1:
+                    on_status(f"Transcribing {len(paths)} chunks in parallel...")
+                else:
+                    on_status("Transcribing...")
+            transcribe_tasks = [
+                transcribe_chunk(p, d, f"chunk {i + 1}/{len(paths)}")
+                for i, (p, d) in enumerate(zip(paths, durations_s))
+            ]
+            # Settle every chunk before raising: a bare gather propagates the first
+            # failure while sibling transcriptions are still in flight, and the
+            # finally block would then remove the chunk files out from under them
+            # (each orphan keeps retrying while holding a shared Gemini slot).
+            # return_exceptions=True lets them all finish first; a cancellation
+            # propagates, then a recitation block (so the re-split still runs
+            # when another chunk failed in the same wave), otherwise the first
+            # real error (one chunk failing still fails the whole run).
+            results = await asyncio.gather(*transcribe_tasks, return_exceptions=True)
+            cancelled = next(
+                (r for r in results if isinstance(r, asyncio.CancelledError)), None
+            )
+            if cancelled is not None:
+                raise cancelled
+            errors = [r for r in results if isinstance(r, BaseException)]
+            if errors:
+                blocked = next(
+                    (e for e in errors if isinstance(e, TranscriptionBlockedError)), None
+                )
+                raise blocked if blocked is not None else errors[0]
+            transcripts = list(results)
+            logger.info(f"Transcribed {len(transcripts)} chunks")
 
-        # Step 3: Clean up each transcript. Chunks are folded to simplified script
-        # before the merge, so a chunk that came back traditional cannot leave
-        # the transcript mixing scripts.
-        transcripts = [_to_simplified(cleanup_repetitive_characters(t)) for t in transcripts]
+            # Clean up each transcript. Chunks are folded to simplified script
+            # before the merge, so a chunk that came back traditional cannot leave
+            # the transcript mixing scripts.
+            transcripts = [_to_simplified(cleanup_repetitive_characters(t)) for t in transcripts]
 
-        # Step 4: Merge if multiple chunks
-        if len(transcripts) > 1:
+            if len(transcripts) == 1:
+                return transcripts[0]
             if on_status:
                 on_status("Merging transcriptions...")
             # About 80ms of pure-Python alignment per seam, so run it off the
             # event loop the bot and the Dropbox watcher share.
-            full_text = await asyncio.to_thread(_merge_transcriptions, transcripts, seam_overlaps_s)
-        else:
-            full_text = transcripts[0]
+            return await asyncio.to_thread(_merge_transcriptions, transcripts, overlaps_s)
+
+        try:
+            full_text = await _run_pipeline(chunk_paths, chunk_durations_s, seam_overlaps_s)
+        except TranscriptionBlockedError:
+            if duration_ms <= RECITATION_FALLBACK_MS:
+                # Already at or below the fallback chunk size: nothing to gain.
+                raise
+            logger.warning(
+                "Transcription blocked by recitation filter; retrying with "
+                f"{RECITATION_FALLBACK_MINUTES}-minute chunks..."
+            )
+            if on_status:
+                on_status(
+                    "Blocked by recitation filter; retrying with "
+                    f"{RECITATION_FALLBACK_MINUTES}-minute chunks..."
+                )
+            fallback_dir = temp_dir / "recitation_fallback"
+            fallback_dir.mkdir(exist_ok=True)
+            fb_paths, fb_durations_ms, _, fb_starts_ms = await asyncio.to_thread(
+                _split_audio, audio_path_obj, fallback_dir, RECITATION_FALLBACK_MS
+            )
+            full_text = await _run_pipeline(
+                fb_paths,
+                [d / 1000 for d in fb_durations_ms],
+                _seam_overlaps_s(fb_durations_ms, fb_starts_ms),
+            )
 
         logger.info(f"Transcription completed, text length: {len(full_text)}")
 
@@ -1048,7 +1140,20 @@ async def _transcribe_audio(
                 f"Gemini blocked the response on {model} "
                 f"(block_reason={getattr(block_reason, 'name', None) or block_reason})"
             )
-        raise ValueError("Transcription returned empty result.")
+        # RECITATION arrives on candidates[0].finish_reason, not prompt_feedback.
+        finish_reason = None
+        if response.candidates:
+            finish_reason = getattr(response.candidates[0], "finish_reason", None)
+        fr_name = getattr(finish_reason, "name", None) or str(finish_reason)
+        if finish_reason is not None and "RECITATION" in fr_name.upper():
+            raise TranscriptionBlockedError(
+                "Transcription blocked by Gemini recitation filter (output matches "
+                "published text)"
+            )
+        raise ValueError(
+            f"Transcription returned empty result "
+            f"(finish_reason={fr_name}, prompt_feedback={response.prompt_feedback})"
+        )
 
     # Warn only: a long chunk hitting the output cap is not fixable by a retry,
     # and the partial transcript is still worth keeping.

@@ -17,7 +17,7 @@ from ..config import config
 from ..utils.url_parser import is_youtube_url, is_bilibili_url, is_apple_podcasts_url, is_xiaoyuzhou_url, is_supported_url, get_url_platform, extract_video_id, extract_xiaoyuzhou_episode_id
 from ..utils import settings_store
 from ..services.downloader import download_audio, download_audio_from_url, DownloadResult, VideoMetadata
-from ..services.transcriber import transcribe, TranscriptionMetadata, is_podcast_video
+from ..services.transcriber import transcribe, TranscriptionMetadata, is_podcast_video, recording_date
 from ..services.editor import edit, edit_podcast, PodcastEpisodeMetadata, VideoEditorMetadata
 from ..services.rss_parser import get_episode_metadata, extract_episode_id
 from ..services.xiaoyuzhou_parser import get_episode_metadata as get_xiaoyuzhou_metadata
@@ -1166,15 +1166,18 @@ async def _process_audio_file(
             else:
                 raise  # Re-raise if no file_path
 
-        # Create metadata from caption if provided
-        transcription_metadata = None
+        # An upload always gets transcription metadata, caption or not: the
+        # date is what anchors spoken years (see recording_date).
+        recorded, date_is_upper_bound = recording_date(file_name, message.date.date())
+        transcription_metadata = TranscriptionMetadata(
+            source_name="Direct Upload",
+            title=base_name,
+            publish_date=recorded,
+            description=caption or "",
+            date_is_upper_bound=date_is_upper_bound,
+        )
         editor_metadata = None
         if caption:
-            transcription_metadata = TranscriptionMetadata(
-                source_name="Direct Upload",
-                title=base_name,
-                description=caption,
-            )
             editor_metadata = VideoEditorMetadata(
                 title=base_name,
                 channel="Direct Upload",

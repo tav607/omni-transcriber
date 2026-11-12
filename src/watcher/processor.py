@@ -23,7 +23,7 @@ from aiogram.types import FSInputFile
 
 from ..config import AppConfig, DropboxWatcherConfig
 from ..services.transcriber import Labeling, TranscriptionMetadata, recording_date, transcribe
-from ..services.editor import edit
+from ..services.editor import RecordingInfo, edit
 from ..services.pdf_generator import generate_pdf
 from .context_loader import ContextConfig
 
@@ -404,6 +404,7 @@ async def process_audio_file(
             mode=context.mode,
             roles=context.roles,
             glossary=context.glossary,
+            recording=RecordingInfo(base_name, recorded, date_is_upper_bound),
         )
         del raw_transcript  # Free memory early
         logger.info(f"Editing complete, length: {len(edited_transcript)}")

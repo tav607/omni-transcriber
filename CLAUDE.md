@@ -41,7 +41,7 @@ Telegram bot that transcribes audio (from YouTube/Bilibili/Apple Podcasts/Xiaoyu
 - `mode`, `roles` and `participants` reach transcription as a `Labeling` (`_speaker_guideline` in `transcriber.py`) and editing as `mode` / `roles` arguments of `edit()` (`_edit_system_prompt`). The meeting and earnings guidelines, the roster rule, the role-swap fix and the two edit prompts are the transcribe skill's, word for word; the `participants` rule is this repo's own and has not been measured.
 - `dropbox_watcher.py`: the folder is listed at startup and every audio file outside `_processed` / `_failed` is scheduled, at most `MAX_CONCURRENT_FILES` at once. A `ContextError` holds the file back (`blocked`), reports it, and a later `CONTEXT.md` change retries it. A Dropbox `ApiError` in the loop takes a fresh listing, since a rejected cursor never recovers.
 - The Dropbox app token reads metadata only (`files/download` is refused), so whether a `CONTEXT.md` exists comes from `files_get_metadata` and its content from `rclone cat`.
-- `processor.py`: a failed file moves to `_failed`; the note is named by recording date, never overwrites an existing note, and carries `source` / `recorded` / `mode` front matter (the PDF does not).
+- `processor.py`: the file name and recording date go to the summary step as well as to transcription (`RecordingInfo` in `editor.py`); without them a 2026 earnings clip was titled "Q2 2025" and a file the owner had named was retitled from its content. A failed file moves to `_failed`; the note is named by recording date, never overwrites an existing note, and carries `source` / `recorded` / `mode` front matter (the PDF does not).
 
 ### Key Modules
 

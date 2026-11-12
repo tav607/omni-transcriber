@@ -72,6 +72,7 @@ class DropboxWatcherConfig:
     refresh_token: str = ""  # Dropbox OAuth refresh token (long-lived)
     watch_folder: str | None = None  # Dropbox folder to watch ("" for App folder root, None = disabled)
     processed_subfolder: str = "_processed"  # Subfolder for processed files
+    failed_subfolder: str = "_failed"  # Subfolder for files that failed
     output_folder: str = ""  # Dropbox folder for output, e.g., "/Transcripts"
     telegram_chat_id: int = 0  # Telegram chat ID for notifications
     poll_interval: int = 30  # Longpoll timeout retry interval in seconds
@@ -304,6 +305,7 @@ def load_config() -> AppConfig:
         refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN", ""),
         watch_folder=os.getenv("DROPBOX_WATCH_FOLDER"),  # None if not set, "" for App folder root
         processed_subfolder=os.getenv("DROPBOX_PROCESSED_SUBFOLDER", "_processed"),
+        failed_subfolder=os.getenv("DROPBOX_FAILED_SUBFOLDER", "_failed"),
         output_folder=os.getenv("DROPBOX_OUTPUT_FOLDER", ""),
         telegram_chat_id=dropbox_chat_id,
         poll_interval=dropbox_poll_interval,

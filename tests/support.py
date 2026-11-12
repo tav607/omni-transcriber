@@ -33,7 +33,7 @@ class TranscribeRun:
         self.answer = answer
         self.chunks = chunks
 
-    def run(self, podcast_mode: bool = False) -> str:
+    def run(self, podcast_mode: bool = False, labeling=None) -> str:
         """Audio that fits one chunk is sent as the source file, audio.mp3;
         longer audio is split into chunk_000.mp3, chunk_001.mp3, ..."""
         workdir = Path(tempfile.mkdtemp(prefix="omni_test_"))
@@ -52,7 +52,7 @@ class TranscribeRun:
             return types.Part.from_bytes(data=path.name.encode(), mime_type="audio/mpeg")
 
         async def transcribe_audio(client, source, model, temperature, thinking_level,
-                                   metadata=None, podcast_mode=False, label="chunk"):
+                                   metadata=None, podcast_mode=False, label="chunk", labeling=None):
             return self.answer(source, model)
 
         try:
@@ -66,7 +66,7 @@ class TranscribeRun:
                 stack.enter_context(mock.patch.object(retry, "MAX_RETRY_DELAY_MS", 0))
                 return asyncio.run(transcriber.transcribe(
                     str(audio), TranscriberConfig(api_key="test-key", model=MODEL),
-                    podcast_mode=podcast_mode,
+                    podcast_mode=podcast_mode, labeling=labeling,
                 ))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -77,7 +77,7 @@ def _text_response(text: str) -> types.GenerateContentResponse:
         content=types.Content(role="model", parts=[types.Part.from_text(text=text)]))])
 
 
-def _editor_gemini(edit_chunk, metadata: dict):
+def _editor_gemini(edit_chunk, metadata: dict, on_metadata=None, on_edit=None):
     """A stand-in for editor._gemini_generate, so the real chunk editors,
     metadata parsing and glossary step run: schema calls get the glossary or
     the metadata JSON, edit calls get edit_chunk(raw_chunk)."""
@@ -85,18 +85,26 @@ def _editor_gemini(edit_chunk, metadata: dict):
         if schema is not None:
             if system == editor.GLOSSARY_PROMPT:
                 return _text_response('{"terms": []}')
+            if on_metadata:
+                on_metadata(system, schema)
             return _text_response(json.dumps(metadata, ensure_ascii=False))
+        if on_edit:
+            on_edit(system, contents)
         # "## Raw Transcript Chunk (i/n)", a blank line, then the chunk itself.
         chunk = contents.split("## Raw Transcript Chunk", 1)[1].split("\n", 2)[2]
         return _text_response(edit_chunk(chunk))
     return generate
 
 
-def run_edit(raw: str, edit_chunk, metadata: dict) -> str:
-    """edit() with each edit call answered by edit_chunk(raw_chunk)."""
-    with mock.patch.object(editor, "_gemini_generate", _editor_gemini(edit_chunk, metadata)), \
+def run_edit(raw: str, edit_chunk, metadata: dict, on_metadata=None, on_edit=None, **edit_kwargs) -> str:
+    """edit() with each edit call answered by edit_chunk(raw_chunk). on_edit
+    and on_metadata see the (system prompt, contents or schema) of each call;
+    edit_kwargs go to edit() (mode, sections, roles, glossary, ...)."""
+    fake = _editor_gemini(edit_chunk, metadata, on_metadata, on_edit)
+    with mock.patch.object(editor, "_gemini_generate", fake), \
             mock.patch.object(editor, "_get_client", lambda key: object()):
-        return asyncio.run(editor.edit(raw, EditorConfig(api_key="test-key", model=MODEL)))
+        return asyncio.run(editor.edit(
+            raw, EditorConfig(api_key="test-key", model=MODEL), **edit_kwargs))
 
 
 def run_edit_podcast(raw: str, edit_chunk, metadata: dict,

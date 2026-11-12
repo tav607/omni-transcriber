@@ -6,7 +6,7 @@ import math
 import re
 import logging
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from google import genai
 from google.genai import types
@@ -16,6 +16,15 @@ from ..utils.chinese import _to_simplified
 from ..utils.gemini import is_truncated, _check_served_model, _gemini_sem, get_client, model_path
 from ..utils.retry import with_retry, with_model_fallback
 from .edit_guard import _number_changes, _residual_content, _restore_edit_losses
+from .sections import (
+    QA_START_QUOTE,
+    Section,
+    control_fields,
+    render_sections,
+    sections_for,
+    sections_prompt,
+    sections_schema,
+)
 from .transcriber import (
     _SPEAKER_TOKEN_RE,
     _is_cjk_heavy,
@@ -210,12 +219,6 @@ def _normalize_quotes(text: str) -> str:
 
 USER_PROMPT_PREFIX = "Here's the transcript:\n\n"
 
-# Default sections for metadata generation (used when no CONTEXT.md override)
-DEFAULT_SECTIONS = """Output a JSON object with these fields:
-- "title": string - 简短的中文标题，概括内容主题 (5-15个中文字符，仅中文、数字和基本标点)
-- "summary": string - 中文摘要，概括核心内容和关键结论 (不超过300字)
-- "key_points": array of strings - 中文要点列表，关注可执行事项、决策和重要信息 (最多20条)"""
-
 # System prompt template for metadata generation (JSON output)
 METADATA_SYSTEM_PROMPT_TEMPLATE = """You are a professional transcript analyst. Given an edited transcript, generate structured metadata in JSON format.
 
@@ -230,21 +233,7 @@ METADATA_SYSTEM_PROMPT_TEMPLATE = """You are a professional transcript analyst. 
 - Output ONLY a valid JSON object
 - Do NOT wrap in markdown code blocks or any other formatting
 - Ensure all strings are properly escaped
-- Arrays should contain strings only
 """
-
-# Section heading mappings (field name → display heading)
-SECTION_HEADINGS = {
-    "summary": "Summary",
-    "key_points": "Key Points",
-    "decisions": "Decisions",
-    "action_items": "Action Items",
-    "key_concepts": "Key Concepts",
-    "questions": "Questions",
-    "highlights": "Highlights",
-    "homework": "Homework",
-    "qa": "Q&A Highlights",
-}
 
 # Translation prompt for translating transcript text
 TRANSLATION_SYSTEM_PROMPT = """You are a professional translator. You receive a JSON array of transcript paragraphs. Translate each paragraph into Simplified Chinese (简体中文).
@@ -273,56 +262,6 @@ def _translation_schema(paragraph_count: int) -> dict:
             },
         },
         "required": ["translations"],
-    }
-
-
-# A section-definition line as DEFAULT_SECTIONS writes them, matched per stripped
-# line:  - "field_name": type - description
-_SECTION_FIELD_RE = re.compile(r'^-\s*"([^"]+)"\s*:\s*(.+)$')
-# Any line that looks like it is trying to define an output field: a bullet or
-# numbered list item, or a quoted-name-and-colon shape. Used to catch field
-# lines the strict pattern can't parse (e.g. '*' bullets, unquoted names,
-# full-width colons) so the schema bails rather than silently dropping them.
-_CANDIDATE_FIELD_RE = re.compile(r'^(?:[-*+•]|\d+[.)])\s|^"[^"]+"\s*[:：]')
-
-
-def _build_metadata_schema(sections: str) -> dict | None:
-    """Best-effort response_schema from the section definitions.
-
-    All-or-nothing: returns None (so the caller keeps the multi-strategy regex
-    extraction) unless EVERY field-definition line parses cleanly into a string
-    or array-of-string field. Silently dropping a field the user asked for is
-    worse than the regex path, because constrained decoding would then never
-    emit it. The downstream _build_normal_result renders strings and string
-    lists, which is what this covers."""
-    properties: dict[str, dict] = {}
-    for raw_line in sections.splitlines():
-        line = raw_line.strip()
-        if not _CANDIDATE_FIELD_RE.match(line):
-            continue  # prose, blank line, heading, or the "these fields:" preamble
-        m = _SECTION_FIELD_RE.match(line)
-        if not m:
-            # A field-shaped line the strict pattern can't parse.
-            return None
-        name = m.group(1)
-        # The type token is whatever precedes the ' - description' separator.
-        type_part = m.group(2).split(" - ", 1)[0].strip().lower()
-        if "array" in type_part or "list" in type_part:
-            if any(tok in type_part for tok in ("object", "dict", "pair")):
-                # Object arrays (e.g. Q&A) are too shape-specific to infer here.
-                return None
-            properties[name] = {"type": "array", "items": {"type": "string"}}
-        elif "string" in type_part or "text" in type_part:
-            properties[name] = {"type": "string"}
-        else:
-            # Unknown type token: don't risk constraining the output wrongly.
-            return None
-    if not properties:
-        return None
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": list(properties.keys()),
     }
 
 
@@ -416,33 +355,23 @@ async def _maybe_extract_glossary(
 async def _generate_normal_metadata(
     client: genai.Client,
     transcript: str,
-    sections: str,
+    sections: Sequence[Section],
     model: str,
     temperature: float,
     thinking_level: str,
     metadata: Optional["VideoEditorMetadata"] = None,
     background: str = "",
+    controls: dict[str, str] | None = None,
 ) -> dict:
-    """Generate metadata JSON from edited transcript.
+    """Generate the metadata JSON (title, summary, ...) from the edited transcript.
 
-    Args:
-        client: Gemini API client
-        transcript: The edited transcript text
-        sections: Section definitions (from CONTEXT.md or DEFAULT_SECTIONS)
-        model: Model to use
-        temperature: Temperature setting
-        thinking_level: Gemini thinking level (low/medium/high)
-        metadata: Optional video metadata for additional context
-        background: Optional background context from CONTEXT.md
-
-    Returns:
-        Dictionary with metadata fields (title, summary, key_points, etc.)
+    sections says which fields to write; controls are extra fields a mode asks
+    for that are never rendered (see sections.control_fields). The response is
+    always constrained by a schema built from the same list.
     """
     logger.info("Generating metadata from edited transcript...")
 
-    # Build user content with context
     parts = []
-
     if metadata:
         parts.append("## Source Information")
         parts.append(f"- Channel/Source: {metadata.channel}")
@@ -464,92 +393,34 @@ async def _generate_normal_metadata(
     max_transcript_chars = 500000
     if len(transcript) > max_transcript_chars:
         logger.warning(f"Transcript too long ({len(transcript)} chars), truncating for metadata generation")
-        transcript_truncated = transcript[:max_transcript_chars] + "\n\n[... transcript truncated ...]"
-        parts.append(transcript_truncated)
+        parts.append(transcript[:max_transcript_chars] + "\n\n[... transcript truncated ...]")
     else:
         parts.append(transcript)
 
-    user_content = "\n".join(parts)
-
-    # Build system prompt with sections
-    system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections)
-
-    # Constrain output with a response_schema when the sections parse cleanly;
-    # custom CONTEXT.md sections that don't (e.g. object arrays) return None and
-    # keep the multi-strategy regex path below.
-    schema = _build_metadata_schema(sections)
-    logger.info(
-        "Metadata generation using %s",
-        "response_schema" if schema else "regex extraction",
-    )
+    system_prompt = METADATA_SYSTEM_PROMPT_TEMPLATE.format(sections=sections_prompt(sections, controls))
 
     # Gemini 3 counts thinking tokens against max_output_tokens, and with
     # thinking_level the thinking size is dynamic (no fixed budget), so give the
-    # full model output cap; the truncation guard below still catches runaways.
+    # full model output cap.
     response = await _gemini_generate(
-        client, model, user_content,
+        client, model, "\n".join(parts),
         system=system_prompt, temperature=temperature,
-        thinking_level=thinking_level, max_tokens=65536, schema=schema,
+        thinking_level=thinking_level, max_tokens=65536,
+        schema=sections_schema(sections, controls),
     )
 
     if not response.text:
         raise ValueError("Empty metadata response")
-
-    # With a schema, constrained decoding guarantees valid JSON, so a MAX_TOKENS
-    # truncation (the only failure mode) leaves incomplete JSON: check it before
-    # parsing. Without a schema, truncation is checked only after all extraction
-    # strategies fail, because a MAX_TOKENS stop can cut trailing chatter AFTER a
-    # complete JSON object, which Strategy 2-4 still rescue (a JSON truncated
-    # mid-object can never balance its braces, so no strategy accepts it).
-    if schema is not None and is_truncated(response):
-        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
-
-    response_text = response.text.strip()
-
-    # Strategy 1: Try parsing entire response directly (the schema path lands here)
-    try:
-        return json.loads(response_text)
-    except json.JSONDecodeError:
-        pass
-
-    # Strategy 2: Extract from ```json ... ``` code block
-    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Strategy 3: Extract from ``` ... ``` code block
-    json_match = re.search(r'```\s*([\{\[].*?[\}\]])\s*```', response_text, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Strategy 4: Find first '{' and try parsing progressively longer substrings
-    # This handles cases where LLM adds explanation after JSON
-    first_brace = response_text.find('{')
-    if first_brace != -1:
-        # Try parsing from first '{' to each subsequent '}'
-        brace_count = 0
-        for i, char in enumerate(response_text[first_brace:], start=first_brace):
-            if char == '{':
-                brace_count += 1
-            elif char == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    # Found matching closing brace
-                    candidate = response_text[first_brace:i+1]
-                    try:
-                        return json.loads(candidate)
-                    except json.JSONDecodeError:
-                        continue  # Try next closing brace
-
+    # Constrained decoding yields valid JSON unless the output was cut off.
     if is_truncated(response):
-        raise ValueError("Metadata generation hit max output tokens and no complete JSON could be extracted")
-    raise ValueError(f"No valid JSON found in metadata output: {response_text[:500]}")
+        raise ValueError("Metadata generation hit max output tokens; JSON is incomplete")
+    try:
+        result = json.loads(response.text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Metadata output is not valid JSON ({error}): {response.text[:300]}") from None
+    if not isinstance(result, dict):
+        raise ValueError(f"Metadata output is not a JSON object: {response.text[:300]}")
+    return result
 
 
 # Fallback for locating the prepared-remarks -> Q&A transition when the
@@ -609,63 +480,24 @@ def _split_transcript_at_qa(final_transcript: str, qa_start_quote: str) -> tuple
 def _build_normal_result(
     metadata_dict: dict,
     edited_transcript: str,
+    sections: Sequence[Section],
 ) -> str:
-    """Build final Markdown from metadata dict and edited transcript.
+    """Build the final Markdown: the title as H1, each section as an H2 in
+    section order, then the transcript.
 
-    Fields whose name starts with "_" are control fields, never rendered as
-    sections. Currently `_qa_start_quote` (requested via a CONTEXT.md Sections
-    definition, e.g. for earnings calls): the verbatim opening words of the
-    paragraph where the Q&A session begins. When present, the Transcript section
-    is split into "Management Discussion Section" / "Q&A Section" H3s at that
-    paragraph (transition-phrase regex as fallback; flat transcript if neither
-    matches).
-
-    Args:
-        metadata_dict: Dictionary with title, summary, key_points, etc.
-        edited_transcript: The edited transcript text
-
-    Returns:
-        Final Markdown string
+    When the metadata carries the earnings control field `_qa_start_quote`
+    (the verbatim opening words of the paragraph where the Q&A session
+    begins), the Transcript section is split into "Management Discussion
+    Section" / "Q&A Section" H3s at that paragraph (transition-phrase regex as
+    fallback; flat transcript if neither matches).
     """
-    parts = []
+    title = str(metadata_dict.get("title") or "Transcript").strip()
+    parts = [f"# {title}", ""]
+    parts += render_sections(sections, metadata_dict)
 
-    # Extract title (special handling - becomes h1)
-    title = metadata_dict.get("title", "Transcript")
-    parts.append(f"# {title}")
-    parts.append("")
-
-    # Process remaining fields in order
-    for key, value in metadata_dict.items():
-        # Skip title (already handled) and internal/private fields
-        if key == "title" or key.startswith("_"):
-            continue
-
-        # Get display heading
-        heading = SECTION_HEADINGS.get(key, key.replace("_", " ").title())
-        parts.append(f"## {heading}")
-        parts.append("")
-
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    # Handle list of dicts: join all key-values with <br> followed by two spaces
-                    kv_parts = [f"**{k.upper()}**: {v}" for k, v in item.items()]
-                    parts.append(f"- {'<br>  '.join(kv_parts)}")
-                else:
-                    parts.append(f"- {item}")
-        elif isinstance(value, dict):
-            # Handle nested dicts as key: value pairs
-            for k, v in value.items():
-                parts.append(f"- **{k}**: {v}")
-        else:
-            parts.append(str(value))
-
-        parts.append("")
-
-    # Add transcript section
     parts.append("## Transcript")
     parts.append("")
-    qa_quote = metadata_dict.get("_qa_start_quote")
+    qa_quote = metadata_dict.get(QA_START_QUOTE)
     qa_part = None
     if isinstance(qa_quote, str):
         md_part, qa_part = _split_transcript_at_qa(edited_transcript, qa_quote)
@@ -847,6 +679,79 @@ Use the video information provided to help identify correct speaker names, chann
 - 即使输入看起来不完整，也要直接编辑并输出可用内容
 """
 
+# Edit prompts for the watcher's meeting and earnings modes, and the note for a
+# fixed label roster: the transcribe skill's, word for word.
+MEETING_RAW_EDIT_PROMPT = """You are a professional transcript editor. Clean up this raw transcript chunk of a meeting or call.
+
+## Context
+Use the source information provided to help identify proper nouns.
+
+## Tasks
+
+1. Fix transcription errors: correct obvious speech-to-text mistakes (homophones, garbled words). Do NOT change proper nouns, product names, version numbers, or technical terms, and keep words spoken in English in their Latin spelling. NEVER alter numbers or their scale (amounts, 万/亿, million/billion, percentages, valuations, counts, dates, years): if a number sounds odd or clashes with nearby numbers, keep it exactly as transcribed; never "fix" it to fit the context.
+2. Remove filler words: Chinese (嗯/啊/呃/额/哦/唔/那个/就是/然后/对对对/是是是), English (um/uh/like/you know/I mean/sort of/kind of/basically). Keep meaningful interjections.
+3. Format: the raw transcript carries speaker labels assigned while listening to the audio (**Name:** / **Speaker 1:**). Keep each label at the start of its turn and the same label for the same person; replace a generic label with a real name only when the dialogue makes the identity clear. Add paragraph breaks at speaker changes or topic shifts. Remove stutters and repetitions.
+4. Preserve completeness: output the FULL content. Do not truncate or omit anything. Keep the original language.
+5. Never output an error message or meta-commentary. If the chunk looks incomplete or garbled, just edit and output the available text; do NOT reply with phrases like "It appears that..." or "Please provide...".
+
+Output only the edited transcript text, no titles, explanations, or JSON."""
+
+EARNINGS_RAW_EDIT_PROMPT = """You are a professional editor of earnings call transcripts. Clean up this raw transcript chunk.
+
+## Context
+Use the source information provided to help identify correct speaker names, company names, and financial terms.
+
+## Tasks
+
+1. **Fix transcription errors**:
+   - Correct obvious speech-to-text mistakes (homophones, garbled words)
+   - Fix speaker name errors using context: executives are introduced in the opening remarks, analysts are announced by the operator with their firm
+   - NEVER alter numbers: revenue figures, percentages, growth rates, margins, guidance ranges, dates. If a number sounds odd, keep it as transcribed
+   - Preserve product names, ticker symbols, and financial terms unless clearly garbled
+
+2. **Remove filler words**:
+   - English: um/uh/like/you know/I mean/sort of/kind of/basically
+   - Chinese: 嗯/啊/呃/额/哦/唔/那个/就是/然后
+   - Keep meaningful interjections
+
+3. **Format**:
+   - The raw transcript normally carries speaker labels assigned while listening to the audio (**Name:** / **Operator:** / **Speaker 1:**). Preserve them: keep each label at the start of its turn, keep the same label for the same person, and upgrade generic labels to real names when the dialogue makes the identity clear (speakers introduce themselves; the operator names each analyst)
+   - If a stretch of the transcript (or the entire transcript) has no labels, assign them from scratch using the same **Name:** / **Operator:** / **Speaker N:** convention
+   - Remove timestamps (e.g. **00:00**, **01:23**)
+   - Add paragraph breaks for readability
+
+4. **Cross-chunk consistency**: This chunk may be one piece of a longer transcript whose pieces are edited independently, so labels must not depend on what other chunks chose. When assigning NEW labels to unlabeled turns, prefer real names, then **Operator:**, and use numbered **Speaker N:** only as a last resort. Never renumber or reassign labels that are already present.
+
+5. **Preserve completeness**: output the FULL content, including operator instructions and the safe-harbor / forward-looking-statements boilerplate. Do not truncate or omit anything. Keep the original language.
+
+6. **No error messages**: never output meta-commentary or an error notice. If the chunk looks incomplete or garbled, just edit and output the available text; do NOT reply with phrases like "It appears that..." or "Please provide...".
+
+Output only the edited transcript text, no titles, explanations, or JSON."""
+
+
+def _fixed_labels_note(roles: Sequence[str]) -> str:
+    """Edit-prompt addendum for a fixed label roster: the edit prompts
+    otherwise invite the editor to swap generic labels for real names, which
+    would undo a deliberately anonymous roster."""
+    labels = " / ".join(f"**{s}:**" for s in roles)
+    return (
+        "\n\n## Fixed speaker labels\n"
+        f"The speaker labels come from a fixed roster: {labels}. Keep them exactly as "
+        "written at the start of each turn. Never rename them, never replace them with "
+        "real names, and never introduce any other label."
+    )
+
+
+def _edit_system_prompt(mode: str, has_context: bool, roles: Sequence[str]) -> str:
+    if mode == "earnings":
+        prompt = EARNINGS_RAW_EDIT_PROMPT
+    elif mode == "meeting":
+        prompt = MEETING_RAW_EDIT_PROMPT
+    else:
+        prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if has_context else RAW_EDIT_SYSTEM_PROMPT
+    return prompt + (_fixed_labels_note(roles) if roles else "")
+
+
 # Speaker-turn boundary: a newline before a "Name:" label. First branch is the
 # transcription prompts' own contract, the colon-inside-bold **Name:** form
 # (identical to _SPEAKER_TOKEN_RE); second branch keeps the looser
@@ -931,11 +836,14 @@ def _split_into_chunks(transcript: str, max_size: int = CHUNK_SIZE) -> list[str]
 async def edit(
     transcript: str,
     config: EditorConfig,
-    sections_override: str | None = None,
+    sections: Sequence[Section] | None = None,
     enable_translation: bool = False,
     metadata: Optional[VideoEditorMetadata] = None,
     background: str = "",
     on_status: Callable[[str], None] | None = None,
+    mode: str = "generic",
+    roles: Sequence[str] = (),
+    glossary: Sequence[str] = (),
 ) -> str:
     """
     Edit and format a transcript using Gemini API with multi-step processing.
@@ -948,11 +856,16 @@ async def edit(
     Args:
         transcript: The raw transcript text to edit
         config: Editor configuration
-        sections_override: Optional override for section definitions (from CONTEXT.md)
+        sections: Output sections (from CONTEXT.md); None gives the mode's own
         enable_translation: If True, add inline Chinese translations for non-Chinese transcripts
         metadata: Optional video metadata for context (helps with speaker names, proper nouns)
         background: Optional background context from CONTEXT.md (for Dropbox watcher mode)
         on_status: Optional callback to report status updates
+        mode: "generic", "meeting" or "earnings": picks the edit prompt and the
+            default sections (the watcher passes a folder's CONTEXT.md mode)
+        roles: Fixed speaker-label roster the editor must leave exactly as is
+        glossary: Terms whose spelling the editor must keep, on top of the
+            ones extracted from the transcript
 
     Returns:
         The edited and formatted transcript as Markdown
@@ -983,9 +896,11 @@ async def edit(
 
     # A glossary extracted from the whole transcript keeps proper-noun spellings
     # consistent across the independently-edited chunks.
-    glossary = await _maybe_extract_glossary(
+    extracted = await _maybe_extract_glossary(
         client, transcript, len(chunks), config.translation_model, on_status
     )
+    # The folder's own terms come first; extracted ones fill in around them.
+    terms = list(glossary) + [t for t in extracted if t not in glossary]
 
     # Process all chunks in parallel (bounded by the shared semaphore)
     restored_spans: List[int] = []
@@ -1007,7 +922,9 @@ async def edit(
                         len(chunks),
                         metadata,
                         background,
-                        glossary,
+                        terms,
+                        mode,
+                        roles,
                     ),
                     config.model,
                     context=f"Editing chunk {index + 1}",
@@ -1028,8 +945,11 @@ async def edit(
     # Combine edited chunks (a dropped markup-only chunk comes back empty)
     edited_transcript = "\n\n".join(c for c in edited_chunks if c.strip())
     # Uploaded recordings and watcher files are transcribed with speaker
-    # labels and edited here; a no-op on unlabeled single-track video.
-    edited_transcript = _normalize_speaker_labels(edited_transcript)
+    # labels and edited here; a no-op on unlabeled single-track video. A fixed
+    # roster is left exactly as labeled: its labels are roles, and "BDA" would
+    # otherwise be merged into a second roster label such as "BDA 同事".
+    if not roles:
+        edited_transcript = _normalize_speaker_labels(edited_transcript)
 
     logger.info(f"Edited transcript: {len(transcript)} -> {len(edited_transcript)} chars")
 
@@ -1039,7 +959,8 @@ async def edit(
     # Both steps consume only edited_transcript, so they run concurrently. The
     # translation is best-effort per chunk (never raises), so it cannot cancel
     # the metadata sibling task; a metadata failure still fails the run, as before.
-    sections = sections_override or DEFAULT_SECTIONS
+    sections = sections_for(mode, sections)
+    controls = control_fields(mode)
 
     async def _run_metadata() -> dict:
         return await with_model_fallback(
@@ -1052,6 +973,7 @@ async def edit(
                 "high",  # Metadata generation always uses high thinking
                 metadata,
                 background,
+                controls,
             ),
             config.model,
             context="Generating metadata",
@@ -1099,7 +1021,7 @@ async def edit(
     # ============================================
     # Step 3: Assemble final Markdown
     # ============================================
-    final_output = _build_normal_result(metadata_dict, final_transcript)
+    final_output = _build_normal_result(metadata_dict, final_transcript, sections)
     # The metadata and translation calls can still answer in traditional script
     # when the source leans that way, and the h1 title also names the output
     # file. Fold before normalizing quotes: zhconv turns 「」 into curly quotes.
@@ -1124,6 +1046,8 @@ async def _edit_raw_chunk(
     metadata: Optional[VideoEditorMetadata] = None,
     background: str = "",
     glossary: Optional[List[str]] = None,
+    mode: str = "generic",
+    roles: Sequence[str] = (),
 ) -> str:
     """Edit a raw transcript chunk (fix errors, remove fillers)."""
     logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks}...")
@@ -1156,7 +1080,7 @@ async def _edit_raw_chunk(
     user_content = "\n".join(parts)
 
     # Use context-aware prompt if metadata or background provided
-    system_prompt = RAW_EDIT_WITH_CONTEXT_SYSTEM_PROMPT if (metadata or background) else RAW_EDIT_SYSTEM_PROMPT
+    system_prompt = _edit_system_prompt(mode, bool(metadata or background), roles)
 
     response = await _gemini_generate(
         client, model, user_content,

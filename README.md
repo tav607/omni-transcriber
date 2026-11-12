@@ -11,6 +11,8 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 - Auto-detect podcast/interview videos and format them with takeaways, Q&A, and
   highlights (override per message with `#podcast` / `#nopodcast`)
 - Output as both Markdown and PDF files
+- Watch a Dropbox folder: drop a recording in, get the note in another folder, with
+  per-folder settings in a `CONTEXT.md` (see Dropbox Folder Mode)
 - Chinese summary with original language transcript preservation (Chinese text is
   normalized to Simplified script; Japanese is left alone)
 - User settings via Telegram commands:
@@ -136,6 +138,70 @@ The bot will reply with:
 - `/help` - Usage instructions
 - `/model` - Choose AI models for the transcriber and the editor (Argon or Flash)
 - `/translation` - Toggle inline Chinese translation
+
+## Dropbox Folder Mode
+
+With the `DROPBOX_*` variables set, the bot also watches a Dropbox folder. Drop an audio file anywhere under it and the transcript note is uploaded to `DROPBOX_OUTPUT_FOLDER`, the PDF is sent to `DROPBOX_TELEGRAM_CHAT_ID`, and the audio moves to a `_processed` subfolder next to where it was.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN` | | Dropbox app credentials, used to detect changes (metadata access is enough) |
+| `DROPBOX_WATCH_FOLDER` | unset (off) | Folder to watch; empty string for the app folder root |
+| `DROPBOX_RCLONE_REMOTE`, `DROPBOX_RCLONE_BASE_PATH` | `dropbox`, empty | rclone remote that moves the files, and the path the watch folder has on it |
+| `DROPBOX_OUTPUT_FOLDER` | | Folder on the rclone remote for the notes |
+| `DROPBOX_TELEGRAM_CHAT_ID` | | Chat that gets status messages and the PDF |
+| `DROPBOX_PROCESSED_SUBFOLDER`, `DROPBOX_FAILED_SUBFOLDER` | `_processed`, `_failed` | Where finished and failed audio moves |
+| `DROPBOX_POLL_INTERVAL` | `30` | Longpoll timeout in seconds |
+| `DROPBOX_MAX_FILE_SIZE_MB` | `500` | Larger files fail without being downloaded |
+
+- Every audio file outside `_processed` and `_failed` is work to do, including files that arrived while the service was down: the folder is scanned at startup.
+- A file that fails moves to `_failed`, with the reason sent to Telegram. Move it back out to retry.
+- The note is named `<title> - <recording date>`. The recording date is the date in the file name if there is one, otherwise the file's own modification date. A name already taken gets ` (2)`, ` (3)`, ... instead of being overwritten.
+- The note starts with YAML front matter: `source` (the audio file), `recorded`, `mode`.
+- The first status message lists the settings the run uses.
+
+### CONTEXT.md
+
+A folder's settings live in a `CONTEXT.md`: YAML front matter, then free-text background.
+
+```markdown
+---
+mode: meeting
+participants:
+  - Jane: the client, an analyst in New York
+  - Sam: my manager, mostly listening
+glossary: [CoWoS, CCL]
+---
+Weekly calls with the client about semiconductor research.
+```
+
+Every `CONTEXT.md` from the watch folder root down to the audio file's folder applies, root first. Put what all folders share in the root file. A folder overrides a setting by stating it; `glossary` terms and background text add up instead. HTML comments in the background are dropped.
+
+| Setting | Values | Effect |
+|---------|--------|--------|
+| `mode` | `meeting` (default), `earnings`, `generic` | Picks the speaker-labeling rule, the edit prompt and the default sections. `meeting`: every turn labeled by name or `Speaker N`, English terms kept in Latin spelling. `earnings`: `Operator` plus real names, and the transcript split into Management Discussion and Q&A. `generic`: single-track audio, speaker changes only where obvious. |
+| `participants` | list of `Name` or `Name: description` | People expected on the recording. Their turns get exactly these labels once they are recognized; others are labeled as the mode says. |
+| `roles` | list of two or more labels, asking side first | Fixed labels for an interview, e.g. `[BDA, 专家]`. Every turn gets one of them and real names are never used. Cannot be combined with `participants`. |
+| `glossary` | list of terms | Spellings the editor must keep. |
+| `translation` | `true` / `false` | Inline Chinese translation for non-Chinese transcripts. |
+| `output_folder` | subfolder path | Subfolder of `DROPBOX_OUTPUT_FOLDER` for this folder's notes. |
+| `sections` | list, see below | The note's sections, replacing the mode's defaults. |
+
+Each entry of `sections` has a `key`, a `prompt` saying what to write, an optional `type` (`list`, the default; `text`; `qa` for question and answer pairs) and an optional `heading`:
+
+```yaml
+sections:
+  - key: summary
+    type: text
+    prompt: 访谈摘要 (中文，不超过300字)
+  - key: data_points
+    heading: Data Points
+    prompt: 专家提到的具体数字，保留原始数值与单位
+```
+
+A title is always written; add a `title` entry only to change how it is worded. A section the model leaves empty is left out of the note.
+
+A `CONTEXT.md` that cannot be read or contains a mistake (unknown setting, bad value, the pre-2026-11 `## Background` / `## Sections` format) stops the files it governs: the reason goes to Telegram, the audio stays where it is, and it runs once a `CONTEXT.md` is saved again.
 
 ## Local Bot API Server (Optional)
 

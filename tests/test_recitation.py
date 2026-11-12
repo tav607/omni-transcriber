@@ -51,7 +51,7 @@ def run_transcribe(answer, duration_ms: int):
         return types.Part.from_bytes(data=path.name.encode(), mime_type="audio/mpeg")
 
     async def transcribe_audio(client, source, model, temperature, thinking_level,
-                               metadata=None, podcast_mode=False, label="chunk"):
+                               metadata=None, podcast_mode=False, label="chunk", labeling=None):
         return answer(source.inline_data.data.decode(), model)
 
     try:

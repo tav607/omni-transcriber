@@ -8,6 +8,7 @@ from typing import Callable, Optional
 import yt_dlp
 
 from ..utils.url_parser import (
+    is_youtube_url,
     extract_video_id,
     extract_bilibili_video_id,
     is_bilibili_url,
@@ -43,6 +44,20 @@ class DownloadError(Exception):
     """Exception raised for audio download errors."""
 
     pass
+
+
+def _youtube_egress_opts(url: str) -> dict:
+    """yt-dlp options that pick the network exit for a YouTube request.
+
+    YouTube answers every request from some datacenter addresses with "Sign in
+    to confirm you're not a bot". YOUTUBE_SOURCE_ADDRESS names a local address
+    whose traffic the host routes out another way (on gcp-vm, the WARP
+    tunnel's address). Other sites keep the default route.
+    """
+    address = os.getenv("YOUTUBE_SOURCE_ADDRESS", "").strip()
+    if address and is_youtube_url(url):
+        return {"source_address": address}
+    return {}
 
 
 async def download_audio(
@@ -113,6 +128,7 @@ async def download_audio(
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         },
+        **_youtube_egress_opts(url),
     }
 
     # Run yt-dlp in a thread pool to avoid blocking
@@ -226,6 +242,7 @@ async def get_video_info(url: str) -> dict | None:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
+        **_youtube_egress_opts(url),
     }
 
     loop = asyncio.get_event_loop()

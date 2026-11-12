@@ -93,6 +93,7 @@ Edit `.env` with your credentials:
 | `GOOGLE_VERTEX_BASE_URL` | *(official endpoint)* | Route Gemini (Vertex AI) through a relay/proxy (read by the google-genai SDK) |
 | `TEMP_DIR` | `/tmp/omni_transcriber` | Temporary file directory |
 | `LOG_LEVEL` | `INFO` | Logging level |
+| `YOUTUBE_SOURCE_ADDRESS` | *(empty)* | Local address yt-dlp binds to for YouTube, for hosts whose default exit YouTube blocks (see CLAUDE.md) |
 | `RSSHUB_BASE_URL` | *(empty)* | RSSHub instance URL (required for Xiaoyuzhou) |
 | `RSSHUB_KEY` | *(empty)* | RSSHub access key (optional) |
 | `TELEGRAM_API_SERVER` | *(empty)* | Local Bot API server URL (for files > 20MB) |

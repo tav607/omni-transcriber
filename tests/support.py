@@ -77,7 +77,7 @@ def _text_response(text: str) -> types.GenerateContentResponse:
         content=types.Content(role="model", parts=[types.Part.from_text(text=text)]))])
 
 
-def _editor_gemini(edit_chunk, metadata: dict, on_metadata=None, on_edit=None):
+def _editor_gemini(edit_chunk, metadata: dict, on_metadata=None, on_edit=None, on_summary=None):
     """A stand-in for editor._gemini_generate, so the real chunk editors,
     metadata parsing and glossary step run: schema calls get the glossary or
     the metadata JSON, edit calls get edit_chunk(raw_chunk)."""
@@ -87,6 +87,8 @@ def _editor_gemini(edit_chunk, metadata: dict, on_metadata=None, on_edit=None):
                 return _text_response('{"terms": []}')
             if on_metadata:
                 on_metadata(system, schema)
+            if on_summary:
+                on_summary(contents)
             return _text_response(json.dumps(metadata, ensure_ascii=False))
         if on_edit:
             on_edit(system, contents)
@@ -96,11 +98,13 @@ def _editor_gemini(edit_chunk, metadata: dict, on_metadata=None, on_edit=None):
     return generate
 
 
-def run_edit(raw: str, edit_chunk, metadata: dict, on_metadata=None, on_edit=None, **edit_kwargs) -> str:
+def run_edit(raw: str, edit_chunk, metadata: dict, on_metadata=None, on_edit=None,
+             on_summary=None, **edit_kwargs) -> str:
     """edit() with each edit call answered by edit_chunk(raw_chunk). on_edit
-    and on_metadata see the (system prompt, contents or schema) of each call;
-    edit_kwargs go to edit() (mode, sections, roles, glossary, ...)."""
-    fake = _editor_gemini(edit_chunk, metadata, on_metadata, on_edit)
+    and on_metadata see the (system prompt, contents or schema) of each call,
+    on_summary the user content of the metadata call; edit_kwargs go to edit()
+    (mode, sections, roles, glossary, ...)."""
+    fake = _editor_gemini(edit_chunk, metadata, on_metadata, on_edit, on_summary)
     with mock.patch.object(editor, "_gemini_generate", fake), \
             mock.patch.object(editor, "_get_client", lambda key: object()):
         return asyncio.run(editor.edit(

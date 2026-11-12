@@ -111,6 +111,17 @@ class VideoEditorMetadata:
     webpage_url: str = ""
 
 
+@dataclass(frozen=True)
+class RecordingInfo:
+    """What is known about a watched audio file besides its sound: the name
+    its owner gave it and when it was recorded. Only the summary step reads
+    it. Without it that step titled a file named "魔法森林第一集：苹果篇" on its
+    own, and dated a 2026 earnings call to 2025."""
+    file_name: str
+    recorded: str = ""  # YYYY-MM-DD
+    date_is_upper_bound: bool = False
+
+
 async def _guard_edit(raw: str, edited: str, index: int, restored_spans: List[int]) -> str:
     """Run the edit fidelity guard on one edited chunk (see edit_guard.py).
 
@@ -362,6 +373,7 @@ async def _generate_normal_metadata(
     metadata: Optional["VideoEditorMetadata"] = None,
     background: str = "",
     controls: dict[str, str] | None = None,
+    recording: Optional["RecordingInfo"] = None,
 ) -> dict:
     """Generate the metadata JSON (title, summary, ...) from the edited transcript.
 
@@ -372,6 +384,23 @@ async def _generate_normal_metadata(
     logger.info("Generating metadata from edited transcript...")
 
     parts = []
+    if recording:
+        parts.append("## Recording")
+        parts.append(
+            f"- File name: {recording.file_name} (the name its owner gave the file: "
+            "sometimes a real title, often just a recorder's default)"
+        )
+        if recording.recorded:
+            when = (
+                f"on or before {recording.recorded}"
+                if recording.date_is_upper_bound
+                else f"on {recording.recorded}"
+            )
+            parts.append(
+                f"- Recorded {when}. Read years, quarters and relative dates in the transcript "
+                "against this date; never move them to an earlier year from memory."
+            )
+        parts.append("")
     if metadata:
         parts.append("## Source Information")
         parts.append(f"- Channel/Source: {metadata.channel}")
@@ -844,6 +873,7 @@ async def edit(
     mode: str = "generic",
     roles: Sequence[str] = (),
     glossary: Sequence[str] = (),
+    recording: Optional[RecordingInfo] = None,
 ) -> str:
     """
     Edit and format a transcript using Gemini API with multi-step processing.
@@ -866,6 +896,8 @@ async def edit(
         roles: Fixed speaker-label roster the editor must leave exactly as is
         glossary: Terms whose spelling the editor must keep, on top of the
             ones extracted from the transcript
+        recording: File name and recording date of a watched file, for the
+            summary step only
 
     Returns:
         The edited and formatted transcript as Markdown
@@ -974,6 +1006,7 @@ async def edit(
                 metadata,
                 background,
                 controls,
+                recording,
             ),
             config.model,
             context="Generating metadata",

@@ -16,8 +16,8 @@ Telegram bot for AI-powered audio transcription using Google Gemini API.
 - Chinese summary with original language transcript preservation (Chinese text is
   normalized to Simplified script; Japanese is left alone)
 - User settings via Telegram commands:
-  - `/model` - Choose AI models for transcription and editing (Argon by default,
-    or Flash)
+  - `/model` - Show the AI models for transcription and editing (Argon is the
+    only choice)
   - `/translation` - Toggle inline Chinese translation for non-Chinese content
     (applies to podcasts and videos alike)
 
@@ -85,7 +85,7 @@ Edit `.env` with your credentials:
 | `TELEGRAM_ALLOWED_CHAT_IDS` | *(empty, allows all)* | Comma-separated authorized Chat IDs |
 | `TRANSCRIBER_MODEL` | `gemini-4-argon` | Model for transcription (Dropbox watcher; Telegram chats choose through `/model`) |
 | `EDITOR_MODEL` | `gemini-4-argon` | Model for editing and the summary/metadata step (Dropbox watcher; Telegram chats choose through `/model`) |
-| `TRANSLATION_MODEL` | `gemini-3.8-flash` | Model for inline translation and the cross-chunk glossary |
+| `TRANSLATION_MODEL` | `gemini-4-hydrogen` | Model for inline translation and the cross-chunk glossary |
 | `TRANSCRIBER_TEMPERATURE` | `1.0` | Transcription temperature |
 | `EDITOR_TEMPERATURE` | `1.0` | Editor temperature |
 | `TRANSCRIBER_THINKING_LEVEL` | `high` | Thinking level: `low`, `medium`, or `high` |
@@ -137,7 +137,7 @@ The bot will reply with:
 
 - `/start` - Welcome message
 - `/help` - Usage instructions
-- `/model` - Choose AI models for the transcriber and the editor (Argon or Flash)
+- `/model` - Show the AI models for the transcriber and the editor (Argon is the only choice)
 - `/translation` - Toggle inline Chinese translation
 
 ## Dropbox Folder Mode

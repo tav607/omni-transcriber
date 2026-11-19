@@ -29,26 +29,26 @@ router = Router()
 # Initialize settings store on module load
 settings_store.init()
 
-# Model options. "flash" is pinned to a version rather than the moving alias:
-# gemini-flash-latest silently repointed to 3.7-flash on release day, which put
-# the pipeline on an untested model without anyone choosing to. A pin can go
-# stale too: since 2026-10-08 Google serves requests for gemini-3.7-flash with
-# gemini-3.8-flash (the response's model_version says so), so "flash" names
-# the model that actually answers. Chat requests resolve through this table
-# and override TRANSCRIBER_MODEL / EDITOR_MODEL; the Dropbox watcher uses those.
-# There is no "pro" choice any more (removed 2026-11-11): it dated from before
-# Argon, read as the top tier while being the weaker model, and in the
-# 2026-08-14 runs 1 of 5 pro transcriptions fabricated 146 words of financial
-# guidance that was never spoken. It was the automatic fallback until
-# 2026-11-19, when gemini-4-neon took that over (utils/retry.py).
+# Model options. Chat requests resolve through this table and override
+# TRANSCRIBER_MODEL / EDITOR_MODEL; the Dropbox watcher uses those. Argon is
+# the only choice left:
+# - "flash" (gemini-3.8-flash) was removed on 2026-11-19 with the rest of the
+#   3.8 Flash calls. Its Gemini 4 successor, Hydrogen, is not offered because
+#   it is unreliable as a transcriber: in the transcribe skill's runs that day
+#   1 of 17 chunk calls returned its reasoning as the transcript, and another
+#   came back with no speaker labels.
+# - "pro" was removed on 2026-11-11: it dated from before Argon, read as the
+#   top tier while being the weaker model, and in the 2026-08-14 runs 1 of 5
+#   pro transcriptions fabricated 146 words of financial guidance that was
+#   never spoken.
+# A chat whose stored choice is no longer offered reads the default.
 MODELS = {
-    "flash": "gemini-3.8-flash",
     "argon": "gemini-4-argon",
 }
 # Which choices /model offers per component.
 MODEL_CHOICES = {
-    "transcriber": ("flash", "argon"),
-    "editor": ("flash", "argon"),
+    "transcriber": ("argon",),
+    "editor": ("argon",),
 }
 
 # Default models: Gemini 4 Argon for both. Transcription moved from 3.8-flash
@@ -241,7 +241,7 @@ async def cmd_help(message: Message):
         "*Audio Files:*\n"
         "Send me an audio file (mp3, m4a, wav, webm, etc.)\n\n"
         "*Settings:*\n"
-        "`/model` - Choose AI models for transcription and editing (Argon by default, or Flash)\n"
+        "`/model` - Show the AI models for transcription and editing (Argon)\n"
         "`/translation` - Toggle inline Chinese translation\n\n"
         "*Podcast mode:*\n"
         "Interview / talk-show videos are auto-detected and formatted with "
@@ -336,37 +336,21 @@ async def cmd_model(message: Message):
     current_transcriber = _chosen_model(chat_id, "transcriber")
     current_editor = _chosen_model(chat_id, "editor")
 
-    # Build inline keyboard
-    keyboard = [
-        [InlineKeyboardButton(
-            text="── Transcriber ──",
+    # Build inline keyboard: one header row and one row of choices per component.
+    current = {"transcriber": current_transcriber, "editor": current_editor}
+    keyboard = []
+    for component, header in (("transcriber", "Transcriber"), ("editor", "Editor")):
+        keyboard.append([InlineKeyboardButton(
+            text=f"── {header} ──",
             callback_data="model_noop",
-        )],
-        [
+        )])
+        keyboard.append([
             InlineKeyboardButton(
-                text=f"{'✓ ' if current_transcriber == 'flash' else ''}Flash",
-                callback_data="model_transcriber_flash",
-            ),
-            InlineKeyboardButton(
-                text=f"{'✓ ' if current_transcriber == 'argon' else ''}Argon",
-                callback_data="model_transcriber_argon",
-            ),
-        ],
-        [InlineKeyboardButton(
-            text="── Editor ──",
-            callback_data="model_noop",
-        )],
-        [
-            InlineKeyboardButton(
-                text=f"{'✓ ' if current_editor == 'flash' else ''}Flash",
-                callback_data="model_editor_flash",
-            ),
-            InlineKeyboardButton(
-                text=f"{'✓ ' if current_editor == 'argon' else ''}Argon",
-                callback_data="model_editor_argon",
-            ),
-        ],
-    ]
+                text=f"{'✓ ' if current[component] == key else ''}{key.capitalize()}",
+                callback_data=f"model_{component}_{key}",
+            )
+            for key in MODEL_CHOICES[component]
+        ])
 
     await message.answer(
         "*Model Settings*\n\n"

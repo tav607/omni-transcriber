@@ -87,9 +87,15 @@ class ResponseBlockedError(Exception):
 # concurrency. Serial calls fared no better than parallel ones, so no backoff
 # ladder reaches the other side of it.
 #
-# A concrete id, because Vertex AI has no `-latest` aliases (404); this is the
-# model gemini-pro-latest resolved to on AI Studio.
-FALLBACK_MODEL = "gemini-3.1-pro-preview"
+# A concrete id, because Vertex AI has no `-latest` aliases (404). Neon since
+# 2026-11-19, replacing gemini-3.1-pro-preview: in the transcribe skill's paired
+# runs of that day it matched Argon (CRWV call against the FactSet transcript,
+# substitutions 0.66-0.79% against 0.73-0.79%, same entities, no year drift).
+# It is a Gemini 4 model like the default, so whether it stays up while Argon's
+# capacity is down, or passes a request Argon blocks, has not been observed.
+# It has to differ from the transcriber and editor models: with_model_fallback
+# has nowhere to go otherwise.
+FALLBACK_MODEL = "gemini-4-neon"
 
 
 async def with_model_fallback(

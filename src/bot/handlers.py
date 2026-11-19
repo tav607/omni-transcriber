@@ -39,8 +39,8 @@ settings_store.init()
 # There is no "pro" choice any more (removed 2026-11-11): it dated from before
 # Argon, read as the top tier while being the weaker model, and in the
 # 2026-08-14 runs 1 of 5 pro transcriptions fabricated 146 words of financial
-# guidance that was never spoken. gemini-3.1-pro-preview lives on only as the
-# automatic fallback (utils/retry.py).
+# guidance that was never spoken. It was the automatic fallback until
+# 2026-11-19, when gemini-4-neon took that over (utils/retry.py).
 MODELS = {
     "flash": "gemini-3.8-flash",
     "argon": "gemini-4-argon",
